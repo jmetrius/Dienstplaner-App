@@ -5,6 +5,7 @@ Entities: clinics, employees, qualifications, shifts, plus employee–qualificat
 
 from __future__ import annotations
 
+import calendar
 import sqlite3
 from pathlib import Path
 from typing import Iterable
@@ -49,6 +50,22 @@ CANONICAL_QUALIFICATIONS: tuple[str, ...] = (
     "Notaufnahme",
     "Notaufnahme-Facharztstandard",
 )
+
+# Absence categories (DB code -> UI label).
+ABSENCE_CATEGORY_CODES: tuple[str, ...] = ("sick", "vacation", "holiday", "other")
+ABSENCE_CATEGORY_LABELS: dict[str, str] = {
+    "sick": "Krankheit",
+    "vacation": "Urlaub",
+    "holiday": "Feiertag",
+    "other": "Sonstiges",
+}
+
+# Shift preference: soft constraint for scheduling.
+PREFERENCE_CODES: tuple[str, ...] = ("prefer_work", "prefer_off")
+PREFERENCE_LABELS: dict[str, str] = {
+    "prefer_work": "Schicht bevorzugt",
+    "prefer_off": "Keine Schicht",
+}
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -97,6 +114,33 @@ CREATE TABLE IF NOT EXISTS shifts (
 CREATE INDEX IF NOT EXISTS idx_shifts_date ON shifts(shift_date);
 CREATE INDEX IF NOT EXISTS idx_shifts_clinic ON shifts(clinic_id);
 CREATE INDEX IF NOT EXISTS idx_employees_clinic ON employees(clinic_id);
+
+CREATE TABLE IF NOT EXISTS employee_absences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'other'
+        CHECK (category IN ('sick', 'vacation', 'holiday', 'other')),
+    notes TEXT,
+    CHECK (start_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    CHECK (end_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    CHECK (start_date <= end_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_absences_employee ON employee_absences(employee_id);
+CREATE INDEX IF NOT EXISTS idx_absences_range ON employee_absences(start_date, end_date);
+
+CREATE TABLE IF NOT EXISTS employee_shift_preferences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    pref_date TEXT NOT NULL,
+    preference TEXT NOT NULL CHECK (preference IN ('prefer_work', 'prefer_off')),
+    notes TEXT,
+    CHECK (pref_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')
+);
+
+CREATE INDEX IF NOT EXISTS idx_pref_employee ON employee_shift_preferences(employee_id);
 """
 
 
@@ -167,6 +211,51 @@ def _migrate_employees_to_v2(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE employees_new RENAME TO employees")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_employees_clinic ON employees(clinic_id)"
+    )
+    conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _migrate_shift_preferences_single_date(conn: sqlite3.Connection) -> None:
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='employee_shift_preferences'"
+    ).fetchone()
+    if exists is None:
+        return
+    cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(employee_shift_preferences)").fetchall()
+    }
+    if "pref_date" in cols:
+        return
+    if "start_date" not in cols:
+        return
+
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute(
+        """
+        CREATE TABLE employee_shift_preferences_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+            pref_date TEXT NOT NULL,
+            preference TEXT NOT NULL CHECK (preference IN ('prefer_work', 'prefer_off')),
+            notes TEXT,
+            CHECK (pref_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO employee_shift_preferences_new (id, employee_id, pref_date, preference, notes)
+        SELECT id, employee_id, start_date, preference, notes
+        FROM employee_shift_preferences
+        """
+    )
+    conn.execute("DROP TABLE employee_shift_preferences")
+    conn.execute("ALTER TABLE employee_shift_preferences_new RENAME TO employee_shift_preferences")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pref_employee ON employee_shift_preferences(employee_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pref_date ON employee_shift_preferences(pref_date)"
     )
     conn.execute("PRAGMA foreign_keys = ON")
 
@@ -291,6 +380,149 @@ def delete_employee(conn: sqlite3.Connection, employee_id: int) -> None:
     conn.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
 
 
+def month_date_bounds(year: int, month: int) -> tuple[str, str]:
+    """Inclusive ISO start and end dates for the calendar month."""
+    start = f"{year:04d}-{month:02d}-01"
+    last = calendar.monthrange(year, month)[1]
+    end = f"{year:04d}-{month:02d}-{last:02d}"
+    return start, end
+
+
+def list_employee_options(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            "SELECT id, name FROM employees ORDER BY name COLLATE NOCASE"
+        )
+    )
+
+
+def list_absences_overlapping_month(
+    conn: sqlite3.Connection, *, year: int, month: int
+) -> list[sqlite3.Row]:
+    month_start, month_end = month_date_bounds(year, month)
+    sql = """
+        SELECT
+            a.id,
+            a.employee_id,
+            e.name AS employee_name,
+            a.start_date,
+            a.end_date,
+            a.category,
+            a.notes
+        FROM employee_absences a
+        INNER JOIN employees e ON e.id = a.employee_id
+        WHERE a.start_date <= ? AND a.end_date >= ?
+        ORDER BY a.start_date, e.name COLLATE NOCASE
+    """
+    return list(conn.execute(sql, (month_end, month_start)))
+
+
+def list_preferences_overlapping_month(
+    conn: sqlite3.Connection, *, year: int, month: int
+) -> list[sqlite3.Row]:
+    month_start, month_end = month_date_bounds(year, month)
+    sql = """
+        SELECT
+            p.id,
+            p.employee_id,
+            e.name AS employee_name,
+            p.pref_date,
+            p.preference,
+            p.notes
+        FROM employee_shift_preferences p
+        INNER JOIN employees e ON e.id = p.employee_id
+        WHERE p.pref_date >= ? AND p.pref_date <= ?
+        ORDER BY p.pref_date, e.name COLLATE NOCASE
+    """
+    return list(conn.execute(sql, (month_start, month_end)))
+
+
+def insert_absence(
+    conn: sqlite3.Connection,
+    *,
+    employee_id: int,
+    start_date: str,
+    end_date: str,
+    category: str,
+    notes: str | None,
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO employee_absences
+            (employee_id, start_date, end_date, category, notes)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (employee_id, start_date, end_date, category, notes or None),
+    )
+    return int(cur.lastrowid)
+
+
+def update_absence(
+    conn: sqlite3.Connection,
+    absence_id: int,
+    *,
+    employee_id: int,
+    start_date: str,
+    end_date: str,
+    category: str,
+    notes: str | None,
+) -> None:
+    conn.execute(
+        """
+        UPDATE employee_absences
+        SET employee_id = ?, start_date = ?, end_date = ?, category = ?, notes = ?
+        WHERE id = ?
+        """,
+        (employee_id, start_date, end_date, category, notes or None, absence_id),
+    )
+
+
+def delete_absence(conn: sqlite3.Connection, absence_id: int) -> None:
+    conn.execute("DELETE FROM employee_absences WHERE id = ?", (absence_id,))
+
+
+def insert_shift_preference(
+    conn: sqlite3.Connection,
+    *,
+    employee_id: int,
+    pref_date: str,
+    preference: str,
+    notes: str | None,
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO employee_shift_preferences
+            (employee_id, pref_date, preference, notes)
+        VALUES (?, ?, ?, ?)
+        """,
+        (employee_id, pref_date, preference, notes or None),
+    )
+    return int(cur.lastrowid)
+
+
+def update_shift_preference(
+    conn: sqlite3.Connection,
+    pref_id: int,
+    *,
+    employee_id: int,
+    pref_date: str,
+    preference: str,
+    notes: str | None,
+) -> None:
+    conn.execute(
+        """
+        UPDATE employee_shift_preferences
+        SET employee_id = ?, pref_date = ?, preference = ?, notes = ?
+        WHERE id = ?
+        """,
+        (employee_id, pref_date, preference, notes or None, pref_id),
+    )
+
+
+def delete_shift_preference(conn: sqlite3.Connection, pref_id: int) -> None:
+    conn.execute("DELETE FROM employee_shift_preferences WHERE id = ?", (pref_id,))
+
+
 def load_month_assignments(
     conn: sqlite3.Connection,
     *,
@@ -335,6 +567,10 @@ def init_database(db_path: str | Path | None = None) -> Path:
         _migrate_shifts_shift_slot(conn)
         _seed_reference_data(conn)
         _migrate_employees_to_v2(conn)
+        _migrate_shift_preferences_single_date(conn)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pref_date ON employee_shift_preferences(pref_date)"
+        )
         conn.commit()
     finally:
         conn.close()
