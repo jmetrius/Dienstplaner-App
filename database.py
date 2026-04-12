@@ -26,6 +26,10 @@ SHIFT_SLOT_LABELS: dict[str, str] = {
     "zna_dr_b": "ZNA DR B",
 }
 
+# Manual schedule: which qualifications may fill which slots (matches qualifications.name).
+SHIFT_SLOTS_HAUSDienst: frozenset[str] = frozenset({"2_dienst", "3_dienst"})
+SHIFT_SLOTS_ZNA: frozenset[str] = frozenset({"zna_dr_a", "zna_dr_b"})
+
 # Canonical clinics: (code, display name) — fixed order for UI.
 CLINIC_CODE_ORDER: tuple[str, ...] = (
     "kardiologie",
@@ -552,6 +556,111 @@ def load_month_assignments(
         key = (str(row["shift_date"]), str(row["shift_slot"]))
         out[key] = str(row["name"])
     return out
+
+
+def qualification_names_for_shift_slot(shift_slot: str) -> tuple[str, ...]:
+    """Exact qualification.name values required to be selectable for this slot."""
+    if shift_slot in SHIFT_SLOTS_HAUSDienst:
+        return ("Hausdienst",)
+    if shift_slot in SHIFT_SLOTS_ZNA:
+        return ("Notaufnahme", "Notaufnahme-Facharztstandard")
+    return ()
+
+
+def list_employees_eligible_for_schedule_slot(
+    conn: sqlite3.Connection, shift_slot: str
+) -> list[sqlite3.Row]:
+    names = qualification_names_for_shift_slot(shift_slot)
+    if not names:
+        return []
+    placeholders = ",".join("?" * len(names))
+    sql = f"""
+        SELECT DISTINCT e.id, e.name
+        FROM employees e
+        INNER JOIN employee_qualifications eq ON eq.employee_id = e.id
+        INNER JOIN qualifications q ON q.id = eq.qualification_id
+        WHERE e.active = 1 AND q.name IN ({placeholders})
+        ORDER BY e.name COLLATE NOCASE
+    """
+    return list(conn.execute(sql, names))
+
+
+def get_employee_name(conn: sqlite3.Connection, employee_id: int) -> str | None:
+    row = conn.execute(
+        "SELECT name FROM employees WHERE id = ?", (employee_id,)
+    ).fetchone()
+    return str(row["name"]) if row else None
+
+
+def load_month_shift_employee_ids(
+    conn: sqlite3.Connection,
+    *,
+    clinic_id: int,
+    year: int,
+    month: int,
+) -> dict[tuple[str, str], int]:
+    """(shift_date, shift_slot) -> employee_id for assigned shifts in the month."""
+    start = f"{year:04d}-{month:02d}-01"
+    if month == 12:
+        end_exclusive = f"{year + 1:04d}-01-01"
+    else:
+        end_exclusive = f"{year:04d}-{month + 1:02d}-01"
+
+    sql = """
+        SELECT shift_date, shift_slot, employee_id
+        FROM shifts
+        WHERE clinic_id = ?
+          AND shift_date >= ? AND shift_date < ?
+          AND employee_id IS NOT NULL
+    """
+    out: dict[tuple[str, str], int] = {}
+    for row in conn.execute(sql, (clinic_id, start, end_exclusive)):
+        key = (str(row["shift_date"]), str(row["shift_slot"]))
+        out[key] = int(row["employee_id"])
+    return out
+
+
+def set_shift_assignment(
+    conn: sqlite3.Connection,
+    clinic_id: int,
+    shift_date: str,
+    shift_slot: str,
+    employee_id: int | None,
+) -> None:
+    """Assign or clear one slot. Persists within caller's transaction."""
+    if employee_id is None:
+        conn.execute(
+            """
+            DELETE FROM shifts
+            WHERE clinic_id = ? AND shift_date = ? AND shift_slot = ?
+            """,
+            (clinic_id, shift_date, shift_slot),
+        )
+        return
+    row = conn.execute(
+        """
+        SELECT id FROM shifts
+        WHERE clinic_id = ? AND shift_date = ? AND shift_slot = ?
+        """,
+        (clinic_id, shift_date, shift_slot),
+    ).fetchone()
+    if row is not None:
+        conn.execute(
+            """
+            UPDATE shifts SET employee_id = ?
+            WHERE clinic_id = ? AND shift_date = ? AND shift_slot = ?
+            """,
+            (employee_id, clinic_id, shift_date, shift_slot),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO shifts
+                (clinic_id, employee_id, shift_slot, shift_date, start_time, end_time)
+            VALUES (?, ?, ?, ?, '00:00', '00:00')
+            """,
+            (clinic_id, employee_id, shift_slot, shift_date),
+        )
 
 
 def init_database(db_path: str | Path | None = None) -> Path:

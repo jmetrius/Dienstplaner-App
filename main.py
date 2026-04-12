@@ -11,7 +11,7 @@ from collections.abc import Callable
 from datetime import date
 
 from PyQt6.QtCore import QDate, Qt
-from PyQt6.QtGui import QBrush, QColor, QFont
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -48,6 +48,7 @@ from database import (
     delete_employee,
     delete_shift_preference,
     get_connection,
+    get_employee_name,
     get_first_clinic_id,
     init_database,
     insert_absence,
@@ -57,9 +58,11 @@ from database import (
     list_canonical_clinics,
     list_employee_options,
     list_employees,
+    list_employees_eligible_for_schedule_slot,
     list_preferences_overlapping_month,
     list_qualifications_ordered,
-    load_month_assignments,
+    load_month_shift_employee_ids,
+    set_shift_assignment,
     update_absence,
     update_employee,
     update_shift_preference,
@@ -890,6 +893,7 @@ class MainWindow(QMainWindow):
         today = date.today()
         self._year = today.year
         self._month = today.month
+        self._schedule_loading = False
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -973,11 +977,11 @@ class MainWindow(QMainWindow):
         self._schedule_table.setAlternatingRowColors(True)
         self._schedule_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._schedule_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self._schedule_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._schedule_table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._schedule_table.verticalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Fixed
         )
-        self._schedule_table.verticalHeader().setDefaultSectionSize(26)
+        self._schedule_table.verticalHeader().setDefaultSectionSize(30)
         self._schedule_table.verticalHeader().setMinimumWidth(88)
 
         hdr = self._schedule_table.horizontalHeader()
@@ -1018,6 +1022,7 @@ class MainWindow(QMainWindow):
         self._title.setText(self._month_title())
 
         _, days_in_month = calendar.monthrange(self._year, self._month)
+        self._schedule_loading = True
         self._schedule_table.clear()
         self._schedule_table.setRowCount(days_in_month)
         self._schedule_table.setColumnCount(len(SHIFT_SLOT_CODES))
@@ -1033,34 +1038,121 @@ class MainWindow(QMainWindow):
 
         self._schedule_table.setVerticalHeaderLabels(row_labels)
 
-        assignments: dict[tuple[str, str], str] = {}
+        ids_map: dict[tuple[str, str], int] = {}
         conn = get_connection()
         try:
             clinic_id = get_first_clinic_id(conn)
             if clinic_id is not None:
-                assignments = load_month_assignments(
+                ids_map = load_month_shift_employee_ids(
                     conn, clinic_id=clinic_id, year=self._year, month=self._month
                 )
+            for d in range(1, days_in_month + 1):
+                day_dt = date(self._year, self._month, d)
+                iso = day_dt.isoformat()
+                is_today = day_dt == today
+                for col, slot in enumerate(SHIFT_SLOT_CODES):
+                    current_id = ids_map.get((iso, slot))
+                    cb = self._make_schedule_shift_combo(
+                        conn,
+                        clinic_id=clinic_id,
+                        shift_date_iso=iso,
+                        shift_slot=slot,
+                        current_employee_id=current_id,
+                        highlight_today=is_today,
+                    )
+                    self._schedule_table.setCellWidget(d - 1, col, cb)
         finally:
             conn.close()
 
-        today_bg = QBrush(QColor("#e8f4fc"))
-        for d in range(1, days_in_month + 1):
-            day_dt = date(self._year, self._month, d)
-            iso = day_dt.isoformat()
-            is_today = day_dt == today
-            for col, slot in enumerate(SHIFT_SLOT_CODES):
-                text = assignments.get((iso, slot), "")
-                item = QTableWidgetItem(text)
-                item.setTextAlignment(
-                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+        self._schedule_loading = False
+
+    def _make_schedule_shift_combo(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        clinic_id: int | None,
+        shift_date_iso: str,
+        shift_slot: str,
+        current_employee_id: int | None,
+        highlight_today: bool,
+    ) -> QComboBox:
+        cb = QComboBox()
+        cb.setProperty("shift_date_iso", shift_date_iso)
+        cb.setProperty("shift_slot", shift_slot)
+        cb.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+
+        if clinic_id is None:
+            cb.addItem("No clinic", None)
+            cb.setEnabled(False)
+            return cb
+
+        eligible = list_employees_eligible_for_schedule_slot(conn, shift_slot)
+        eligible_ids = {int(r["id"]) for r in eligible}
+
+        cb.addItem("—", None)
+        for row in eligible:
+            cb.addItem(str(row["name"]), int(row["id"]))
+
+        if (
+            current_employee_id is not None
+            and current_employee_id not in eligible_ids
+        ):
+            name = get_employee_name(conn, current_employee_id)
+            label = (
+                f"{name} (not qualified)"
+                if name
+                else f"#{current_employee_id} (not qualified)"
+            )
+            cb.addItem(label, current_employee_id)
+
+        if current_employee_id is not None:
+            for i in range(cb.count()):
+                data = cb.itemData(i)
+                if data is not None and int(data) == current_employee_id:
+                    cb.setCurrentIndex(i)
+                    break
+        else:
+            cb.setCurrentIndex(0)
+
+        if highlight_today:
+            cb.setStyleSheet(
+                "QComboBox { background-color: #e8f4fc; font-weight: bold; }"
+            )
+
+        cb.currentIndexChanged.connect(self._on_schedule_shift_combo_changed)
+        return cb
+
+    def _on_schedule_shift_combo_changed(self, _index: int) -> None:
+        if self._schedule_loading:
+            return
+        cb = self.sender()
+        if not isinstance(cb, QComboBox) or not cb.isEnabled():
+            return
+        iso = cb.property("shift_date_iso")
+        slot = cb.property("shift_slot")
+        if not isinstance(iso, str) or not isinstance(slot, str):
+            return
+        raw = cb.currentData()
+        employee_id = int(raw) if raw is not None else None
+
+        conn = get_connection()
+        try:
+            clinic_id = get_first_clinic_id(conn)
+            if clinic_id is None:
+                QMessageBox.warning(
+                    self,
+                    "Schedule",
+                    "No clinic is defined; cannot save shift assignments.",
                 )
-                if is_today:
-                    item.setBackground(today_bg)
-                    f = item.font()
-                    f.setBold(True)
-                    item.setFont(f)
-                self._schedule_table.setItem(d - 1, col, item)
+                return
+            set_shift_assignment(conn, clinic_id, iso, slot, employee_id)
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            conn.rollback()
+            QMessageBox.critical(self, "Schedule save failed", str(exc))
+            self._rebuild_schedule_table()
+        finally:
+            conn.close()
 
 
 def main() -> int:
