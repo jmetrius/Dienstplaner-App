@@ -20,6 +20,7 @@ class SolverConfig:
     prefer_off_penalty: int = 8
     prefer_work_reward: int = 3
     imbalance_weight: int = 6
+    one_day_gap_penalty: int = 5
     clinic_uniqueness_soft: bool = False
     clinic_duplicate_penalty: int = 20
 
@@ -281,6 +282,23 @@ def solve_month_schedule(
         if worked_weekend_vars:
             model.Add(sum(worked_weekend_vars) <= 2)
 
+    one_day_gap_vars: list[cp_model.IntVar] = []
+    for employee_id in all_tracked_employees:
+        for idx in range(len(dates) - 2):
+            d1 = dates[idx]
+            d3 = dates[idx + 2]
+            day1_expr = sum(employee_day_vars.get((employee_id, d1), [])) + employee_day_base.get(
+                (employee_id, d1), 0
+            )
+            day3_expr = sum(employee_day_vars.get((employee_id, d3), [])) + employee_day_base.get(
+                (employee_id, d3), 0
+            )
+            gap_var = model.NewBoolVar(f"one_day_gap_{employee_id}_{d1}")
+            model.Add(gap_var <= day1_expr)
+            model.Add(gap_var <= day3_expr)
+            model.Add(gap_var >= day1_expr + day3_expr - 1)
+            one_day_gap_vars.append(gap_var)
+
     for employee_id in solver_employee_ids:
         max_shifts = employee_max.get(employee_id, 0)
         base_count = employee_month_base.get(employee_id, 0)
@@ -362,6 +380,8 @@ def solve_month_schedule(
         spread = model.NewIntVar(0, max_total_bound, "spread")
         model.Add(spread == max_total - min_total)
         objective_terms.append(cfg.imbalance_weight * spread)
+    if one_day_gap_vars:
+        objective_terms.append(cfg.one_day_gap_penalty * sum(one_day_gap_vars))
     if cfg.clinic_uniqueness_soft and clinic_soft_terms:
         objective_terms.append(cfg.clinic_duplicate_penalty * sum(clinic_soft_terms))
 

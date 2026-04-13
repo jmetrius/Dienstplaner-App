@@ -976,6 +976,9 @@ class SolverTabPage(QWidget):
         self._spin_imbalance_weight = QSpinBox()
         self._spin_imbalance_weight.setRange(0, 100)
         self._spin_imbalance_weight.setValue(6)
+        self._spin_one_day_gap_penalty = QSpinBox()
+        self._spin_one_day_gap_penalty.setRange(0, 200)
+        self._spin_one_day_gap_penalty.setValue(5)
         self._chk_soft_clinic_rule = QCheckBox("Clinic/day rule soft")
         self._chk_soft_clinic_rule.setChecked(False)
         self._spin_clinic_duplicate_penalty = QSpinBox()
@@ -996,6 +999,8 @@ class SolverTabPage(QWidget):
         settings.addWidget(self._spin_prefer_work_reward)
         settings.addWidget(QLabel("Fairness weight"))
         settings.addWidget(self._spin_imbalance_weight)
+        settings.addWidget(QLabel("One-day-gap penalty"))
+        settings.addWidget(self._spin_one_day_gap_penalty)
         settings.addWidget(self._chk_soft_clinic_rule)
         settings.addWidget(QLabel("Clinic duplicate penalty"))
         settings.addWidget(self._spin_clinic_duplicate_penalty)
@@ -1083,6 +1088,7 @@ class SolverTabPage(QWidget):
         self._spin_prefer_off_penalty.setEnabled(not self._running)
         self._spin_prefer_work_reward.setEnabled(not self._running)
         self._spin_imbalance_weight.setEnabled(not self._running)
+        self._spin_one_day_gap_penalty.setEnabled(not self._running)
         self._chk_soft_clinic_rule.setEnabled(not self._running)
         self._spin_clinic_duplicate_penalty.setEnabled(
             (not self._running) and self._chk_soft_clinic_rule.isChecked()
@@ -1145,6 +1151,7 @@ class SolverTabPage(QWidget):
             prefer_off_penalty=int(self._spin_prefer_off_penalty.value()),
             prefer_work_reward=int(self._spin_prefer_work_reward.value()),
             imbalance_weight=int(self._spin_imbalance_weight.value()),
+            one_day_gap_penalty=int(self._spin_one_day_gap_penalty.value()),
             clinic_uniqueness_soft=self._chk_soft_clinic_rule.isChecked(),
             clinic_duplicate_penalty=int(self._spin_clinic_duplicate_penalty.value()),
         )
@@ -1155,6 +1162,7 @@ class SolverTabPage(QWidget):
             f"prefer_off_penalty={solver_config.prefer_off_penalty}, "
             f"prefer_work_reward={solver_config.prefer_work_reward}, "
             f"imbalance_weight={solver_config.imbalance_weight}, "
+            f"one_day_gap_penalty={solver_config.one_day_gap_penalty}, "
             f"clinic_rule_soft={solver_config.clinic_uniqueness_soft}, "
             f"clinic_duplicate_penalty={solver_config.clinic_duplicate_penalty}"
         )
