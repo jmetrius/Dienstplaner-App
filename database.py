@@ -40,6 +40,7 @@ CLINIC_CODE_ORDER: tuple[str, ...] = (
     "pneumologie",
     "gastroenterologie",
     "geriatrie",
+    "imc",
     "zna",
 )
 CANONICAL_CLINICS: tuple[tuple[str, str], ...] = (
@@ -50,6 +51,7 @@ CANONICAL_CLINICS: tuple[tuple[str, str], ...] = (
     ("pneumologie", "Pneumologie"),
     ("gastroenterologie", "Gastroenterologie"),
     ("geriatrie", "Geriatrie"),
+    ("imc", "IMC"),
     ("zna", "ZNA"),
 )
 
