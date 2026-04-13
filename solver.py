@@ -10,7 +10,7 @@ from typing import Callable
 
 from ortools.sat.python import cp_model
 
-from database import SHIFT_SLOT_CODES, qualification_names_for_shift_slot
+from database import SHIFT_SLOT_CODES, SHIFT_SLOTS_ZNA, qualification_names_for_shift_slot
 
 
 @dataclass(frozen=True)
@@ -186,6 +186,37 @@ def solve_month_schedule(
             model.AddExactlyOne(
                 [variables[(iso_date, slot, employee_id)] for employee_id in candidates]
             )
+
+    facharzt_qual = "Notaufnahme-Facharztstandard"
+    for iso_date in dates:
+        fixed_has_facharzt = False
+        facharzt_vars: list[cp_model.IntVar] = []
+        for slot in SHIFT_SLOTS_ZNA:
+            fixed_employee = fixed_assignments.get((iso_date, slot))
+            if fixed_employee is not None:
+                if facharzt_qual in employee_quals.get(int(fixed_employee), set()):
+                    fixed_has_facharzt = True
+                continue
+            for employee_id in slot_candidates.get((iso_date, slot), []):
+                if facharzt_qual in employee_quals.get(employee_id, set()):
+                    facharzt_vars.append(variables[(iso_date, slot, employee_id)])
+        if fixed_has_facharzt:
+            continue
+        if not facharzt_vars:
+            log(
+                "Infeasible day: no Notaufnahme-Facharztstandard coverage possible "
+                f"for ZNA DR A/B on {iso_date}."
+            )
+            return SolverResult(
+                solutions=[],
+                status="infeasible",
+                message=(
+                    "At least one ZNA doctor per day must have "
+                    "Notaufnahme-Facharztstandard."
+                ),
+                logs=logs,
+            )
+        model.Add(sum(facharzt_vars) >= 1)
 
     all_tracked_employees = set(solver_employee_ids)
     all_tracked_employees.update(employee_id for employee_id, _ in employee_day_base.keys())
