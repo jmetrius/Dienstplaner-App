@@ -71,6 +71,7 @@ def solve_month_schedule(
     employee_clinic_by_id = dict(solver_input.get("employee_clinic_by_id", {}))
 
     active_employee_ids: list[int] = []
+    solver_employee_ids: list[int] = []
     employee_max: dict[int, int] = {}
     employee_quals: dict[int, set[str]] = {}
     for item in employees_raw:
@@ -78,6 +79,8 @@ def solve_month_schedule(
             continue
         employee_id = int(item["id"])
         active_employee_ids.append(employee_id)
+        if str(item.get("clinic_code", "")) != "zna":
+            solver_employee_ids.append(employee_id)
         employee_max[employee_id] = int(item["max_shifts_per_month"])
         employee_clinic_by_id.setdefault(employee_id, int(item["clinic_id"]))
         quals = item.get("qualifications", set())
@@ -93,17 +96,24 @@ def solve_month_schedule(
             message="No dates available for selected month.",
             logs=logs,
         )
+    if not solver_employee_ids:
+        return SolverResult(
+            solutions=[],
+            status="infeasible",
+            message="No solver-eligible employees (clinic 'ZNA' is manual-only).",
+            logs=logs,
+        )
 
     model = cp_model.CpModel()
     variables: dict[tuple[str, str, int], cp_model.IntVar] = {}
     slot_candidates: dict[tuple[str, str], list[int]] = {}
     employee_day_vars: dict[tuple[int, str], list[cp_model.IntVar]] = {}
     employee_month_vars: dict[int, list[cp_model.IntVar]] = {
-        employee_id: [] for employee_id in active_employee_ids
+        employee_id: [] for employee_id in solver_employee_ids
     }
 
     employee_day_base: dict[tuple[int, str], int] = {}
-    employee_month_base: dict[int, int] = {employee_id: 0 for employee_id in active_employee_ids}
+    employee_month_base: dict[int, int] = {employee_id: 0 for employee_id in solver_employee_ids}
     clinic_day_base: dict[tuple[int, str], int] = {}
 
     for iso_date, rows in external_assignments_by_date.items():
@@ -149,7 +159,7 @@ def solve_month_schedule(
                 continue
             required_quals = set(qualification_names_for_shift_slot(slot))
             candidates: list[int] = []
-            for employee_id in active_employee_ids:
+            for employee_id in solver_employee_ids:
                 if required_quals and not (employee_quals.get(employee_id, set()) & required_quals):
                     continue
                 if iso_date in absences_by_employee.get(employee_id, set()):
@@ -172,7 +182,7 @@ def solve_month_schedule(
                 [variables[(iso_date, slot, employee_id)] for employee_id in candidates]
             )
 
-    all_tracked_employees = set(active_employee_ids)
+    all_tracked_employees = set(solver_employee_ids)
     all_tracked_employees.update(employee_id for employee_id, _ in employee_day_base.keys())
 
     for employee_id in all_tracked_employees:
@@ -212,7 +222,7 @@ def solve_month_schedule(
             expr2 = sum(employee_day_vars.get((employee_id, d2), [])) + base2
             model.Add(expr1 + expr2 <= 1)
 
-    for employee_id in active_employee_ids:
+    for employee_id in solver_employee_ids:
         max_shifts = employee_max.get(employee_id, 0)
         base_count = employee_month_base.get(employee_id, 0)
         if base_count > max_shifts:
@@ -278,8 +288,8 @@ def solve_month_schedule(
             objective_terms.append(-cfg.prefer_work_reward * var)
 
     totals: list[cp_model.IntVar] = []
-    max_total_bound = max((employee_max.get(eid, 0) for eid in active_employee_ids), default=0)
-    for employee_id in active_employee_ids:
+    max_total_bound = max((employee_max.get(eid, 0) for eid in solver_employee_ids), default=0)
+    for employee_id in solver_employee_ids:
         base_count = employee_month_base.get(employee_id, 0)
         total_var = model.NewIntVar(0, max_total_bound, f"total_{employee_id}")
         model.Add(total_var == sum(employee_month_vars.get(employee_id, [])) + base_count)
@@ -301,7 +311,8 @@ def solve_month_schedule(
 
     log(
         f"Building model for {year:04d}-{month:02d} clinic {clinic_id}: "
-        f"{len(slot_candidates)} open slots, {len(fixed_assignments)} fixed slots."
+        f"{len(slot_candidates)} open slots, {len(fixed_assignments)} fixed slots, "
+        f"{len(active_employee_ids) - len(solver_employee_ids)} ZNA manual-only employees excluded."
     )
 
     solutions: list[SolverSolution] = []
@@ -326,7 +337,7 @@ def solve_month_schedule(
                     break
 
         shift_counts: dict[int, int] = {}
-        for employee_id in active_employee_ids:
+        for employee_id in solver_employee_ids:
             total = employee_month_base.get(employee_id, 0)
             for var in employee_month_vars.get(employee_id, []):
                 total += solver.Value(var)

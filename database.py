@@ -39,6 +39,8 @@ CLINIC_CODE_ORDER: tuple[str, ...] = (
     "haemat_onkologie",
     "pneumologie",
     "gastroenterologie",
+    "geriatrie",
+    "zna",
 )
 CANONICAL_CLINICS: tuple[tuple[str, str], ...] = (
     ("kardiologie", "Kardiologie"),
@@ -47,6 +49,8 @@ CANONICAL_CLINICS: tuple[tuple[str, str], ...] = (
     ("haemat_onkologie", "Hämatologie/Onkologie"),
     ("pneumologie", "Pneumologie"),
     ("gastroenterologie", "Gastroenterologie"),
+    ("geriatrie", "Geriatrie"),
+    ("zna", "ZNA"),
 )
 
 # Qualification labels (unique in DB); order matches UI columns.
@@ -686,15 +690,21 @@ def load_solver_month_input(
     _, days_in_month = calendar.monthrange(year, month)
     dates = [f"{year:04d}-{month:02d}-{d:02d}" for d in range(1, days_in_month + 1)]
 
+    clinic_code_by_id: dict[int, str] = {}
+    for row in list_clinics(conn):
+        clinic_code_by_id[int(row["id"])] = str(row["code"])
+
     employees: list[dict[str, object]] = []
     for row in list_active_employees_with_qualifications(conn):
         raw_names = str(row["qualification_names"] or "")
         quals = {x for x in raw_names.split(",") if x}
+        clinic_id = int(row["clinic_id"])
         employees.append(
             {
                 "id": int(row["id"]),
                 "name": str(row["name"]),
-                "clinic_id": int(row["clinic_id"]),
+                "clinic_id": clinic_id,
+                "clinic_code": clinic_code_by_id.get(clinic_id, ""),
                 "max_shifts_per_month": int(row["max_shifts_per_month"]),
                 "qualifications": quals,
             }

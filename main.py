@@ -1002,6 +1002,14 @@ class SolverTabPage(QWidget):
         settings.addStretch(1)
         root.addLayout(settings)
 
+        manual_note = QLabel(
+            "Note: Employees assigned to clinic 'ZNA' are manual-only and are excluded "
+            "from automatic solving."
+        )
+        manual_note.setWordWrap(True)
+        manual_note.setStyleSheet("color: #555;")
+        root.addWidget(manual_note)
+
         controls = QHBoxLayout()
         self._btn_solve = QPushButton("Solve")
         self._btn_solve.clicked.connect(self._solve_clicked)
