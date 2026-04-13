@@ -1,0 +1,8 @@
+# Local SQLite database
+*.db
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
