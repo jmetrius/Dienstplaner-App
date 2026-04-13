@@ -43,6 +43,11 @@ def _weekday(iso_date: str) -> int:
     return date.fromisoformat(iso_date).weekday()
 
 
+def _weekend_group_key(iso_date: str) -> tuple[int, int]:
+    dt = date.fromisoformat(iso_date)
+    return dt.isocalendar()[:2]
+
+
 def solve_month_schedule(
     *,
     year: int,
@@ -221,6 +226,29 @@ def solve_month_schedule(
             expr1 = sum(employee_day_vars.get((employee_id, d1), [])) + base1
             expr2 = sum(employee_day_vars.get((employee_id, d2), [])) + base2
             model.Add(expr1 + expr2 <= 1)
+
+    weekend_groups: dict[tuple[int, int], list[str]] = {}
+    for iso_date in dates:
+        if _weekday(iso_date) in (5, 6):
+            weekend_groups.setdefault(_weekend_group_key(iso_date), []).append(iso_date)
+
+    for employee_id in all_tracked_employees:
+        worked_weekend_vars: list[cp_model.IntVar] = []
+        for group_key, weekend_dates in weekend_groups.items():
+            if not weekend_dates:
+                continue
+            weekend_var = model.NewBoolVar(
+                f"weekend_work_{employee_id}_{group_key[0]}_{group_key[1]}"
+            )
+            for weekend_date in weekend_dates:
+                day_expr = (
+                    sum(employee_day_vars.get((employee_id, weekend_date), []))
+                    + employee_day_base.get((employee_id, weekend_date), 0)
+                )
+                model.Add(day_expr <= weekend_var)
+            worked_weekend_vars.append(weekend_var)
+        if worked_weekend_vars:
+            model.Add(sum(worked_weekend_vars) <= 2)
 
     for employee_id in solver_employee_ids:
         max_shifts = employee_max.get(employee_id, 0)
