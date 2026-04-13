@@ -5,12 +5,13 @@ PyQt6 entry point: main window with schedule and employee management tabs.
 from __future__ import annotations
 
 import calendar
+import csv
 import sqlite3
 import sys
 from collections.abc import Callable
 from datetime import date
 
-from PyQt6.QtCore import QDate, Qt
+from PyQt6.QtCore import QDate, QObject, QThread, Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication,
@@ -18,6 +19,8 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateEdit,
+    QDoubleSpinBox,
+    QFileDialog,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -26,6 +29,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QSplitter,
@@ -56,17 +60,21 @@ from database import (
     insert_shift_preference,
     list_absences_overlapping_month,
     list_canonical_clinics,
+    load_solver_month_input,
     list_employee_options,
     list_employees,
     list_employees_eligible_for_schedule_slot,
+    list_clinics,
     list_preferences_overlapping_month,
     list_qualifications_ordered,
     load_month_shift_employee_ids,
+    replace_month_shift_assignments,
     set_shift_assignment,
     update_absence,
     update_employee,
     update_shift_preference,
 )
+from solver import SolverConfig, SolverResult, SolverSolution, solve_month_schedule
 
 N_QUAL = len(CANONICAL_QUALIFICATIONS)
 COL_NAME = 0
@@ -884,6 +892,445 @@ class EmployeeListPage(QWidget):
             self._on_changed()
 
 
+class SolverWorker(QObject):
+    log = pyqtSignal(str)
+    finished = pyqtSignal(object)
+
+    def __init__(
+        self,
+        *,
+        year: int,
+        month: int,
+        clinic_id: int,
+        solver_input: dict[str, object],
+        config: SolverConfig,
+    ) -> None:
+        super().__init__()
+        self._year = year
+        self._month = month
+        self._clinic_id = clinic_id
+        self._solver_input = solver_input
+        self._config = config
+
+    def run(self) -> None:
+        result = solve_month_schedule(
+            year=self._year,
+            month=self._month,
+            clinic_id=self._clinic_id,
+            solver_input=self._solver_input,
+            config=self._config,
+            logger=self.log.emit,
+        )
+        self.finished.emit(result)
+
+
+class SolverTabPage(QWidget):
+    def __init__(
+        self,
+        *,
+        get_month: Callable[[], tuple[int, int]],
+        on_apply: Callable[[], None],
+    ) -> None:
+        super().__init__()
+        self._get_month = get_month
+        self._on_apply = on_apply
+        self._year, self._month = self._get_month()
+        self._running = False
+        self._current_clinic_id: int | None = None
+        self._solutions: list[SolverSolution] = []
+        self._solution_index = 0
+        self._fixed_assignments: dict[tuple[str, str], int] = {}
+        self._employee_names: dict[int, str] = {}
+        self._employee_clinic_ids: dict[int, int] = {}
+        self._clinic_names: dict[int, str] = {}
+        self._worker_thread: QThread | None = None
+        self._worker: SolverWorker | None = None
+
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+        root.setContentsMargins(8, 8, 8, 8)
+
+        self._title = QLabel()
+        title_font = QFont()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        self._title.setFont(title_font)
+        self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self._title)
+
+        settings = QHBoxLayout()
+        self._spin_max_solutions = QSpinBox()
+        self._spin_max_solutions.setRange(1, 20)
+        self._spin_max_solutions.setValue(7)
+        self._spin_time_limit = QDoubleSpinBox()
+        self._spin_time_limit.setRange(1.0, 120.0)
+        self._spin_time_limit.setSingleStep(1.0)
+        self._spin_time_limit.setSuffix(" s")
+        self._spin_time_limit.setValue(8.0)
+        self._spin_prefer_off_penalty = QSpinBox()
+        self._spin_prefer_off_penalty.setRange(0, 100)
+        self._spin_prefer_off_penalty.setValue(8)
+        self._spin_prefer_work_reward = QSpinBox()
+        self._spin_prefer_work_reward.setRange(0, 100)
+        self._spin_prefer_work_reward.setValue(3)
+        self._spin_imbalance_weight = QSpinBox()
+        self._spin_imbalance_weight.setRange(0, 100)
+        self._spin_imbalance_weight.setValue(6)
+        self._chk_soft_clinic_rule = QCheckBox("Clinic/day rule soft")
+        self._chk_soft_clinic_rule.setChecked(False)
+        self._spin_clinic_duplicate_penalty = QSpinBox()
+        self._spin_clinic_duplicate_penalty.setRange(0, 500)
+        self._spin_clinic_duplicate_penalty.setValue(20)
+        self._spin_clinic_duplicate_penalty.setEnabled(False)
+        self._chk_soft_clinic_rule.toggled.connect(
+            self._spin_clinic_duplicate_penalty.setEnabled
+        )
+
+        settings.addWidget(QLabel("Max solutions"))
+        settings.addWidget(self._spin_max_solutions)
+        settings.addWidget(QLabel("Time limit"))
+        settings.addWidget(self._spin_time_limit)
+        settings.addWidget(QLabel("Prefer-off penalty"))
+        settings.addWidget(self._spin_prefer_off_penalty)
+        settings.addWidget(QLabel("Prefer-work reward"))
+        settings.addWidget(self._spin_prefer_work_reward)
+        settings.addWidget(QLabel("Fairness weight"))
+        settings.addWidget(self._spin_imbalance_weight)
+        settings.addWidget(self._chk_soft_clinic_rule)
+        settings.addWidget(QLabel("Clinic duplicate penalty"))
+        settings.addWidget(self._spin_clinic_duplicate_penalty)
+        settings.addStretch(1)
+        root.addLayout(settings)
+
+        controls = QHBoxLayout()
+        self._btn_solve = QPushButton("Solve")
+        self._btn_solve.clicked.connect(self._solve_clicked)
+        self._btn_prev_solution = QPushButton("Previous solution")
+        self._btn_prev_solution.clicked.connect(lambda: self._move_solution(-1))
+        self._btn_next_solution = QPushButton("Next solution")
+        self._btn_next_solution.clicked.connect(lambda: self._move_solution(1))
+        self._btn_apply = QPushButton("Apply selected solution")
+        self._btn_apply.clicked.connect(self._apply_selected_solution)
+        self._btn_export = QPushButton("Export CSV")
+        self._btn_export.clicked.connect(self._export_selected_solution)
+        self._solution_label = QLabel("No solution loaded.")
+
+        controls.addWidget(self._btn_solve)
+        controls.addWidget(self._btn_prev_solution)
+        controls.addWidget(self._btn_next_solution)
+        controls.addWidget(self._btn_apply)
+        controls.addWidget(self._btn_export)
+        controls.addStretch(1)
+        controls.addWidget(self._solution_label)
+        root.addLayout(controls)
+
+        self._preview = QTableWidget()
+        self._preview.setAlternatingRowColors(True)
+        self._preview.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._preview.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._preview.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self._preview.verticalHeader().setDefaultSectionSize(28)
+        ph = self._preview.horizontalHeader()
+        ph.setStretchLastSection(True)
+        for col in range(len(SHIFT_SLOT_CODES)):
+            ph.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+        root.addWidget(self._preview, stretch=1)
+
+        log_label = QLabel("Solver log")
+        root.addWidget(log_label)
+        self._log_window = QPlainTextEdit()
+        self._log_window.setReadOnly(True)
+        self._log_window.document().setMaximumBlockCount(2000)
+        root.addWidget(self._log_window, stretch=1)
+
+        self._update_title()
+        self._render_solution_preview()
+        self._update_solution_controls()
+
+    def set_month(self, year: int, month: int) -> None:
+        changed = (self._year, self._month) != (year, month)
+        self._year, self._month = year, month
+        self._update_title()
+        if changed and not self._running:
+            self._solutions = []
+            self._solution_index = 0
+            self._fixed_assignments = {}
+            self._solution_label.setText("No solution loaded.")
+            self._render_solution_preview()
+            self._update_solution_controls()
+
+    def _update_title(self) -> None:
+        self._title.setText(date(self._year, self._month, 1).strftime("Solver - %B %Y"))
+
+    def _update_solution_controls(self) -> None:
+        has = bool(self._solutions)
+        can_switch = has and len(self._solutions) > 1 and not self._running
+        self._btn_prev_solution.setEnabled(can_switch)
+        self._btn_next_solution.setEnabled(can_switch)
+        self._btn_apply.setEnabled(has and not self._running)
+        self._btn_export.setEnabled(has and not self._running)
+        self._btn_solve.setEnabled(not self._running)
+        self._spin_max_solutions.setEnabled(not self._running)
+        self._spin_time_limit.setEnabled(not self._running)
+        self._spin_prefer_off_penalty.setEnabled(not self._running)
+        self._spin_prefer_work_reward.setEnabled(not self._running)
+        self._spin_imbalance_weight.setEnabled(not self._running)
+        self._chk_soft_clinic_rule.setEnabled(not self._running)
+        self._spin_clinic_duplicate_penalty.setEnabled(
+            (not self._running) and self._chk_soft_clinic_rule.isChecked()
+        )
+
+    def _log(self, msg: str) -> None:
+        self._log_window.appendPlainText(msg)
+
+    def _solve_clicked(self) -> None:
+        if self._running:
+            return
+        conn = get_connection()
+        try:
+            clinic_id = get_first_clinic_id(conn)
+            if clinic_id is None:
+                QMessageBox.warning(self, "Solver", "No clinic found in database.")
+                return
+            solver_input = load_solver_month_input(
+                conn,
+                clinic_id=clinic_id,
+                year=self._year,
+                month=self._month,
+            )
+            clinics = list_clinics(conn)
+        finally:
+            conn.close()
+
+        employees = list(solver_input.get("employees", []))
+        if not employees:
+            QMessageBox.warning(
+                self,
+                "Solver",
+                "No active employees available for solving.",
+            )
+            return
+
+        self._employee_names = {
+            int(k): str(v)
+            for k, v in dict(solver_input.get("employee_name_by_id", {})).items()
+        }
+        self._employee_clinic_ids = {
+            int(k): int(v)
+            for k, v in dict(solver_input.get("employee_clinic_by_id", {})).items()
+        }
+        self._clinic_names = {int(r["id"]): str(r["name"]) for r in clinics}
+        self._fixed_assignments = {
+            (str(k[0]), str(k[1])): int(v)
+            for k, v in dict(solver_input.get("fixed_assignments", {})).items()
+        }
+        self._current_clinic_id = clinic_id
+        self._solutions = []
+        self._solution_index = 0
+        self._log_window.clear()
+        self._log(f"Starting solver for {self._year:04d}-{self._month:02d} ...")
+        self._running = True
+        self._update_solution_controls()
+        solver_config = SolverConfig(
+            max_solutions=int(self._spin_max_solutions.value()),
+            time_limit_seconds=float(self._spin_time_limit.value()),
+            prefer_off_penalty=int(self._spin_prefer_off_penalty.value()),
+            prefer_work_reward=int(self._spin_prefer_work_reward.value()),
+            imbalance_weight=int(self._spin_imbalance_weight.value()),
+            clinic_uniqueness_soft=self._chk_soft_clinic_rule.isChecked(),
+            clinic_duplicate_penalty=int(self._spin_clinic_duplicate_penalty.value()),
+        )
+        self._log(
+            "Settings: "
+            f"max_solutions={solver_config.max_solutions}, "
+            f"time_limit={solver_config.time_limit_seconds:.1f}s, "
+            f"prefer_off_penalty={solver_config.prefer_off_penalty}, "
+            f"prefer_work_reward={solver_config.prefer_work_reward}, "
+            f"imbalance_weight={solver_config.imbalance_weight}, "
+            f"clinic_rule_soft={solver_config.clinic_uniqueness_soft}, "
+            f"clinic_duplicate_penalty={solver_config.clinic_duplicate_penalty}"
+        )
+
+        self._worker_thread = QThread(self)
+        self._worker = SolverWorker(
+            year=self._year,
+            month=self._month,
+            clinic_id=clinic_id,
+            solver_input=solver_input,
+            config=solver_config,
+        )
+        self._worker.moveToThread(self._worker_thread)
+        self._worker_thread.started.connect(self._worker.run)
+        self._worker.log.connect(self._log)
+        self._worker.finished.connect(self._on_solver_finished)
+        self._worker.finished.connect(self._worker_thread.quit)
+        self._worker_thread.finished.connect(self._worker.deleteLater)
+        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
+        self._worker_thread.start()
+
+    def _on_solver_finished(self, result_obj: object) -> None:
+        self._running = False
+        result = result_obj if isinstance(result_obj, SolverResult) else None
+        if result is None:
+            self._log("Solver failed: invalid worker result.")
+            self._solutions = []
+            self._solution_index = 0
+            self._solution_label.setText("No solution loaded.")
+            self._render_solution_preview()
+            self._update_solution_controls()
+            return
+
+        self._solutions = result.solutions
+        self._solution_index = 0
+        self._log(result.message)
+        if not self._solutions:
+            self._solution_label.setText("No solution loaded.")
+            self._render_solution_preview()
+            self._update_solution_controls()
+            QMessageBox.information(self, "Solver", result.message)
+            return
+
+        self._update_solution_label()
+        self._render_solution_preview()
+        self._update_solution_controls()
+        QMessageBox.information(
+            self,
+            "Solver",
+            f"{result.message} Use previous/next to browse candidates.",
+        )
+
+    def _move_solution(self, step: int) -> None:
+        if not self._solutions:
+            return
+        self._solution_index = (self._solution_index + step) % len(self._solutions)
+        self._update_solution_label()
+        self._render_solution_preview()
+
+    def _update_solution_label(self) -> None:
+        if not self._solutions:
+            self._solution_label.setText("No solution loaded.")
+            return
+        current = self._solutions[self._solution_index]
+        self._solution_label.setText(
+            f"Solution {self._solution_index + 1}/{len(self._solutions)} "
+            f"(objective {current.objective_value})"
+        )
+
+    def _render_solution_preview(self) -> None:
+        _, days_in_month = calendar.monthrange(self._year, self._month)
+        self._preview.clear()
+        self._preview.setRowCount(days_in_month)
+        self._preview.setColumnCount(len(SHIFT_SLOT_CODES))
+        self._preview.setHorizontalHeaderLabels(
+            [SHIFT_SLOT_LABELS[slot] for slot in SHIFT_SLOT_CODES]
+        )
+        self._preview.setVerticalHeaderLabels(
+            [
+                date(self._year, self._month, d).strftime("%a %d")
+                for d in range(1, days_in_month + 1)
+            ]
+        )
+        if not self._solutions:
+            return
+
+        current = self._solutions[self._solution_index]
+        for d in range(1, days_in_month + 1):
+            iso = date(self._year, self._month, d).isoformat()
+            for col, slot in enumerate(SHIFT_SLOT_CODES):
+                employee_id = current.assignments.get((iso, slot))
+                text = "—"
+                if employee_id is not None:
+                    text = self._employee_names.get(int(employee_id), f"#{employee_id}")
+                self._preview.setItem(d - 1, col, QTableWidgetItem(text))
+
+    def _apply_selected_solution(self) -> None:
+        if not self._solutions:
+            QMessageBox.information(self, "Solver", "No solution available to apply.")
+            return
+        if self._current_clinic_id is None:
+            QMessageBox.warning(self, "Solver", "No clinic available for writing.")
+            return
+        conn = get_connection()
+        try:
+            replace_month_shift_assignments(
+                conn,
+                clinic_id=self._current_clinic_id,
+                year=self._year,
+                month=self._month,
+                assignments=self._solutions[self._solution_index].assignments,
+            )
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            conn.rollback()
+            QMessageBox.critical(self, "Solver apply failed", str(exc))
+            return
+        finally:
+            conn.close()
+        self._on_apply()
+        QMessageBox.information(self, "Solver", "Selected solution applied successfully.")
+
+    def _export_selected_solution(self) -> None:
+        if not self._solutions:
+            QMessageBox.information(self, "Solver", "No solution available to export.")
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export schedule CSV",
+            f"schedule_{self._year:04d}_{self._month:02d}.csv",
+            "CSV files (*.csv)",
+        )
+        if not filename:
+            return
+        current = self._solutions[self._solution_index]
+        slot_order = {slot: idx for idx, slot in enumerate(SHIFT_SLOT_CODES)}
+        rows: list[tuple[str, str, str, str, str, str, str, str]] = []
+        for (iso, slot), employee_id in sorted(
+            current.assignments.items(), key=lambda item: (item[0][0], slot_order[item[0][1]])
+        ):
+            weekday = date.fromisoformat(iso).strftime("%A")
+            emp_id = int(employee_id)
+            emp_name = self._employee_names.get(emp_id, f"#{emp_id}")
+            emp_clinic_id = self._employee_clinic_ids.get(emp_id)
+            clinic_name = (
+                self._clinic_names.get(emp_clinic_id, f"#{emp_clinic_id}")
+                if emp_clinic_id is not None
+                else ""
+            )
+            source = "manual-fixed" if (iso, slot) in self._fixed_assignments else "solver"
+            rows.append(
+                (
+                    iso,
+                    weekday,
+                    slot,
+                    SHIFT_SLOT_LABELS[slot],
+                    str(emp_id),
+                    emp_name,
+                    clinic_name,
+                    source,
+                )
+            )
+        try:
+            with open(filename, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(
+                    [
+                        "date",
+                        "weekday",
+                        "slot_code",
+                        "slot_label",
+                        "employee_id",
+                        "employee_name",
+                        "employee_clinic",
+                        "source",
+                    ]
+                )
+                writer.writerows(rows)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        QMessageBox.information(self, "Export", "CSV export created.")
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -910,8 +1357,13 @@ class MainWindow(QMainWindow):
         self._employees_page = EmployeeListPage(
             on_changed=self._refresh_after_employee_edit,
         )
+        self._solver_page = SolverTabPage(
+            get_month=lambda: (self._year, self._month),
+            on_apply=self._refresh_after_employee_edit,
+        )
         self._tabs.addTab(self._employees_page, "Employees")
         self._tabs.addTab(self._absences_page, "Absences & preferences")
+        self._tabs.addTab(self._solver_page, "Solver")
 
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
@@ -920,12 +1372,15 @@ class MainWindow(QMainWindow):
     def _refresh_after_employee_edit(self) -> None:
         self._rebuild_schedule_table()
         self._absences_page.reload()
+        self._solver_page.set_month(self._year, self._month)
 
     def _on_tab_changed(self, index: int) -> None:
         if index == 0:
             self._rebuild_schedule_table()
         elif self._tabs.widget(index) is self._absences_page:
             self._absences_page.reload()
+        elif self._tabs.widget(index) is self._solver_page:
+            self._solver_page.set_month(self._year, self._month)
 
     def _build_schedule_tab(self) -> QWidget:
         page = QWidget()
@@ -1020,6 +1475,7 @@ class MainWindow(QMainWindow):
 
     def _rebuild_schedule_table(self) -> None:
         self._title.setText(self._month_title())
+        self._solver_page.set_month(self._year, self._month)
 
         _, days_in_month = calendar.monthrange(self._year, self._month)
         self._schedule_loading = True

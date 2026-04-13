@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import calendar
 import sqlite3
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -618,6 +619,173 @@ def load_month_shift_employee_ids(
         key = (str(row["shift_date"]), str(row["shift_slot"]))
         out[key] = int(row["employee_id"])
     return out
+
+
+def load_month_shift_rows_all_clinics(
+    conn: sqlite3.Connection,
+    *,
+    year: int,
+    month: int,
+) -> list[sqlite3.Row]:
+    """Assigned shifts in the month for all clinics."""
+    start = f"{year:04d}-{month:02d}-01"
+    if month == 12:
+        end_exclusive = f"{year + 1:04d}-01-01"
+    else:
+        end_exclusive = f"{year:04d}-{month + 1:02d}-01"
+    sql = """
+        SELECT
+            s.clinic_id AS schedule_clinic_id,
+            s.shift_date,
+            s.shift_slot,
+            s.employee_id,
+            e.clinic_id AS employee_clinic_id
+        FROM shifts s
+        INNER JOIN employees e ON e.id = s.employee_id
+        WHERE s.shift_date >= ? AND s.shift_date < ?
+          AND s.employee_id IS NOT NULL
+    """
+    return list(conn.execute(sql, (start, end_exclusive)))
+
+
+def list_active_employees_with_qualifications(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    sql = """
+        SELECT
+            e.id,
+            e.name,
+            e.clinic_id,
+            e.max_shifts_per_month,
+            GROUP_CONCAT(q.name) AS qualification_names
+        FROM employees e
+        LEFT JOIN employee_qualifications eq ON eq.employee_id = e.id
+        LEFT JOIN qualifications q ON q.id = eq.qualification_id
+        WHERE e.active = 1
+        GROUP BY e.id
+        ORDER BY e.name COLLATE NOCASE
+    """
+    return list(conn.execute(sql))
+
+
+def load_solver_month_input(
+    conn: sqlite3.Connection,
+    *,
+    clinic_id: int,
+    year: int,
+    month: int,
+) -> dict[str, object]:
+    """
+    Return normalized month input for the automatic solver.
+    Keys:
+      - dates: list[str]
+      - employees: list[dict]
+      - fixed_assignments: dict[(date_iso, slot_code), employee_id]
+      - external_assignments_by_date: dict[date_iso, list[(employee_id, clinic_id)]]
+      - absences_by_employee: dict[employee_id, set[date_iso]]
+      - preferences: dict[(employee_id, date_iso), preference_code]
+    """
+    _, days_in_month = calendar.monthrange(year, month)
+    dates = [f"{year:04d}-{month:02d}-{d:02d}" for d in range(1, days_in_month + 1)]
+
+    employees: list[dict[str, object]] = []
+    for row in list_active_employees_with_qualifications(conn):
+        raw_names = str(row["qualification_names"] or "")
+        quals = {x for x in raw_names.split(",") if x}
+        employees.append(
+            {
+                "id": int(row["id"]),
+                "name": str(row["name"]),
+                "clinic_id": int(row["clinic_id"]),
+                "max_shifts_per_month": int(row["max_shifts_per_month"]),
+                "qualifications": quals,
+            }
+        )
+
+    fixed_assignments = load_month_shift_employee_ids(
+        conn, clinic_id=clinic_id, year=year, month=month
+    )
+
+    external_assignments_by_date: dict[str, list[tuple[int, int]]] = {}
+    for row in load_month_shift_rows_all_clinics(conn, year=year, month=month):
+        schedule_clinic_id = int(row["schedule_clinic_id"])
+        if schedule_clinic_id == clinic_id:
+            continue
+        iso = str(row["shift_date"])
+        bucket = external_assignments_by_date.setdefault(iso, [])
+        bucket.append((int(row["employee_id"]), int(row["employee_clinic_id"])))
+
+    month_start = date(year, month, 1)
+    month_end = date(year, month, days_in_month)
+    absences_by_employee: dict[int, set[str]] = {}
+    for row in list_absences_overlapping_month(conn, year=year, month=month):
+        employee_id = int(row["employee_id"])
+        start_y, start_m, start_d = (int(x) for x in str(row["start_date"]).split("-", 2))
+        end_y, end_m, end_d = (int(x) for x in str(row["end_date"]).split("-", 2))
+        a_start = date(start_y, start_m, start_d)
+        a_end = date(end_y, end_m, end_d)
+        cur = max(month_start, a_start)
+        end = min(month_end, a_end)
+        while cur <= end:
+            absences_by_employee.setdefault(employee_id, set()).add(cur.isoformat())
+            cur += timedelta(days=1)
+
+    preferences: dict[tuple[int, str], str] = {}
+    for row in list_preferences_overlapping_month(conn, year=year, month=month):
+        preferences[(int(row["employee_id"]), str(row["pref_date"]))] = str(
+            row["preference"]
+        )
+
+    employee_clinic_by_id: dict[int, int] = {}
+    employee_name_by_id: dict[int, str] = {}
+    for row in conn.execute("SELECT id, clinic_id, name FROM employees"):
+        employee_id = int(row["id"])
+        employee_clinic_by_id[employee_id] = int(row["clinic_id"])
+        employee_name_by_id[employee_id] = str(row["name"])
+
+    return {
+        "dates": dates,
+        "employees": employees,
+        "fixed_assignments": fixed_assignments,
+        "external_assignments_by_date": external_assignments_by_date,
+        "absences_by_employee": absences_by_employee,
+        "preferences": preferences,
+        "employee_clinic_by_id": employee_clinic_by_id,
+        "employee_name_by_id": employee_name_by_id,
+    }
+
+
+def replace_month_shift_assignments(
+    conn: sqlite3.Connection,
+    *,
+    clinic_id: int,
+    year: int,
+    month: int,
+    assignments: dict[tuple[str, str], int | None],
+) -> None:
+    """Replace all assignments for clinic/month in caller transaction."""
+    start = f"{year:04d}-{month:02d}-01"
+    if month == 12:
+        end_exclusive = f"{year + 1:04d}-01-01"
+    else:
+        end_exclusive = f"{year:04d}-{month + 1:02d}-01"
+    conn.execute(
+        """
+        DELETE FROM shifts
+        WHERE clinic_id = ?
+          AND shift_date >= ? AND shift_date < ?
+        """,
+        (clinic_id, start, end_exclusive),
+    )
+    for (shift_date, shift_slot), employee_id in sorted(assignments.items()):
+        if employee_id is None or shift_slot not in SHIFT_SLOT_CODES:
+            continue
+        conn.execute(
+            """
+            INSERT INTO shifts
+                (clinic_id, employee_id, shift_slot, shift_date, start_time, end_time)
+            VALUES (?, ?, ?, ?, '00:00', '00:00')
+            """,
+            (clinic_id, int(employee_id), shift_slot, shift_date),
+        )
 
 
 def set_shift_assignment(
