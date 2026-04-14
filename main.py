@@ -990,10 +990,12 @@ class SolverTabPage(QWidget):
         self,
         *,
         get_month: Callable[[], tuple[int, int]],
+        get_manual_fixed_assignments: Callable[[int, int], dict[tuple[str, str], int]],
         on_apply: Callable[[], None],
     ) -> None:
         super().__init__()
         self._get_month = get_month
+        self._get_manual_fixed_assignments = get_manual_fixed_assignments
         self._on_apply = on_apply
         self._year, self._month = self._get_month()
         self._running = False
@@ -1176,6 +1178,12 @@ class SolverTabPage(QWidget):
             clinics = list_clinics(conn)
         finally:
             conn.close()
+
+        # Treat manual preplanning from the Schedule tab as fixed solver assignments.
+        manual_fixed_assignments = self._get_manual_fixed_assignments(self._year, self._month)
+        solver_input["fixed_assignments"] = {
+            (str(k[0]), str(k[1])): int(v) for k, v in manual_fixed_assignments.items()
+        }
 
         employees = list(solver_input.get("employees", []))
         if not employees:
@@ -1436,6 +1444,7 @@ class MainWindow(QMainWindow):
         )
         self._solver_page = SolverTabPage(
             get_month=lambda: (self._year, self._month),
+            get_manual_fixed_assignments=self._collect_manual_fixed_assignments,
             on_apply=self._refresh_after_employee_edit,
         )
         self._tabs.addTab(self._employees_page, "Employees")
@@ -1546,6 +1555,37 @@ class MainWindow(QMainWindow):
         t = date.today()
         self._year, self._month = t.year, t.month
         self._rebuild_schedule_table()
+
+    def _collect_manual_fixed_assignments(
+        self, year: int, month: int
+    ) -> dict[tuple[str, str], int]:
+        assignments: dict[tuple[str, str], int] = {}
+        if (year, month) == (self._year, self._month):
+            for row in range(self._schedule_table.rowCount()):
+                for col in range(self._schedule_table.columnCount()):
+                    widget = self._schedule_table.cellWidget(row, col)
+                    if not isinstance(widget, QComboBox):
+                        continue
+                    iso = widget.property("shift_date_iso")
+                    slot = widget.property("shift_slot")
+                    if not isinstance(iso, str) or not isinstance(slot, str):
+                        continue
+                    raw = widget.currentData()
+                    if raw is None:
+                        continue
+                    assignments[(iso, slot)] = int(raw)
+            return assignments
+
+        conn = get_connection()
+        try:
+            clinic_id = get_first_clinic_id(conn)
+            if clinic_id is None:
+                return {}
+            return load_month_shift_employee_ids(
+                conn, clinic_id=clinic_id, year=year, month=month
+            )
+        finally:
+            conn.close()
 
     def _month_title(self) -> str:
         return date(self._year, self._month, 1).strftime("%B %Y")

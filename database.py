@@ -777,13 +777,13 @@ def load_solver_month_input(
     for row in list_active_employees_with_qualifications(conn):
         raw_names = str(row["qualification_names"] or "")
         quals = {x for x in raw_names.split(",") if x}
-        clinic_id = int(row["clinic_id"])
+        employee_clinic_id = int(row["clinic_id"])
         employees.append(
             {
                 "id": int(row["id"]),
                 "name": str(row["name"]),
-                "clinic_id": clinic_id,
-                "clinic_code": clinic_code_by_id.get(clinic_id, ""),
+                "clinic_id": employee_clinic_id,
+                "clinic_code": clinic_code_by_id.get(employee_clinic_id, ""),
                 "max_shifts_per_month": int(row["max_shifts_per_month"]),
                 "qualifications": quals,
             }
