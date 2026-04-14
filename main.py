@@ -117,8 +117,11 @@ class AbsencesPreferencesPage(QWidget):
     P_COL_PREF = 3
     P_COL_NOTES = 4
 
-    def __init__(self) -> None:
+    def __init__(
+        self, on_month_changed: Callable[[int, int], None] | None = None
+    ) -> None:
         super().__init__()
+        self._on_month_changed = on_month_changed
         today = date.today()
         self._year = today.year
         self._month = today.month
@@ -260,6 +263,8 @@ class AbsencesPreferencesPage(QWidget):
             self._year -= 1
         else:
             self._month -= 1
+        if self._on_month_changed is not None:
+            self._on_month_changed(self._year, self._month)
         self.reload()
 
     def _next_month(self) -> None:
@@ -268,11 +273,21 @@ class AbsencesPreferencesPage(QWidget):
             self._year += 1
         else:
             self._month += 1
+        if self._on_month_changed is not None:
+            self._on_month_changed(self._year, self._month)
         self.reload()
 
     def _go_today_month(self) -> None:
         t = date.today()
         self._year, self._month = t.year, t.month
+        if self._on_month_changed is not None:
+            self._on_month_changed(self._year, self._month)
+        self.reload()
+
+    def set_month(self, year: int, month: int) -> None:
+        if (self._year, self._month) == (year, month):
+            return
+        self._year, self._month = year, month
         self.reload()
 
     def _month_title(self) -> str:
@@ -1438,7 +1453,9 @@ class MainWindow(QMainWindow):
         self._schedule_tab = self._build_schedule_tab()
         self._tabs.addTab(self._schedule_tab, "Schedule")
 
-        self._absences_page = AbsencesPreferencesPage()
+        self._absences_page = AbsencesPreferencesPage(
+            on_month_changed=self._set_month_from_tabs,
+        )
         self._employees_page = EmployeeListPage(
             on_changed=self._refresh_after_employee_edit,
         )
@@ -1457,14 +1474,22 @@ class MainWindow(QMainWindow):
 
     def _refresh_after_employee_edit(self) -> None:
         self._rebuild_schedule_table()
-        self._absences_page.reload()
+        self._absences_page.set_month(self._year, self._month)
         self._solver_page.set_month(self._year, self._month)
+
+    def _set_month_from_tabs(self, year: int, month: int) -> None:
+        if (self._year, self._month) == (year, month):
+            return
+        self._year, self._month = year, month
+        self._rebuild_schedule_table()
+        self._absences_page.set_month(year, month)
+        self._solver_page.set_month(year, month)
 
     def _on_tab_changed(self, index: int) -> None:
         if index == 0:
             self._rebuild_schedule_table()
         elif self._tabs.widget(index) is self._absences_page:
-            self._absences_page.reload()
+            self._absences_page.set_month(self._year, self._month)
         elif self._tabs.widget(index) is self._solver_page:
             self._solver_page.set_month(self._year, self._month)
 
@@ -1592,6 +1617,7 @@ class MainWindow(QMainWindow):
 
     def _rebuild_schedule_table(self) -> None:
         self._title.setText(self._month_title())
+        self._absences_page.set_month(self._year, self._month)
         self._solver_page.set_month(self._year, self._month)
 
         _, days_in_month = calendar.monthrange(self._year, self._month)
