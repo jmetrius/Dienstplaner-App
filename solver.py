@@ -81,15 +81,23 @@ def solve_month_schedule(
     employee_max: dict[int, int] = {}
     employee_quals: dict[int, set[str]] = {}
     employee_blocked_weekdays: dict[int, set[int]] = {}
+    zna_employee_ids: set[int] = set()
+    zna_clinic_ids: set[int] = set()
     for item in employees_raw:
         if not isinstance(item, dict):
             continue
         employee_id = int(item["id"])
         active_employee_ids.append(employee_id)
-        if str(item.get("clinic_code", "")) != "zna":
+        is_zna_employee = str(item.get("clinic_code", "")) == "zna"
+        if not is_zna_employee:
             solver_employee_ids.append(employee_id)
+        else:
+            zna_employee_ids.add(employee_id)
         employee_max[employee_id] = int(item["max_shifts_per_month"])
-        employee_clinic_by_id.setdefault(employee_id, int(item["clinic_id"]))
+        clinic_value = int(item["clinic_id"])
+        employee_clinic_by_id.setdefault(employee_id, clinic_value)
+        if is_zna_employee:
+            zna_clinic_ids.add(clinic_value)
         quals = item.get("qualifications", set())
         if isinstance(quals, set):
             employee_quals[employee_id] = {str(q) for q in quals}
@@ -149,17 +157,18 @@ def solve_month_schedule(
 
     for (iso_date, slot), employee_id in fixed_assignments.items():
         eid = int(employee_id)
-        weekday = _weekday(str(iso_date))
-        if weekday in employee_blocked_weekdays.get(eid, set()):
-            log(
-                f"Infeasible fixed assignment: employee {eid} is blocked on weekday {weekday} ({iso_date}) for {slot}."
-            )
-            return SolverResult(
-                solutions=[],
-                status="infeasible",
-                message="Fixed assignments conflict with blocked weekdays.",
-                logs=logs,
-            )
+        if eid not in zna_employee_ids:
+            weekday = _weekday(str(iso_date))
+            if weekday in employee_blocked_weekdays.get(eid, set()):
+                log(
+                    f"Infeasible fixed assignment: employee {eid} is blocked on weekday {weekday} ({iso_date}) for {slot}."
+                )
+                return SolverResult(
+                    solutions=[],
+                    status="infeasible",
+                    message="Fixed assignments conflict with blocked weekdays.",
+                    logs=logs,
+                )
         employee_day_base[(eid, iso_date)] = employee_day_base.get((eid, iso_date), 0) + 1
         if eid in employee_month_base:
             employee_month_base[eid] += 1
@@ -167,7 +176,11 @@ def solve_month_schedule(
         if clinic_for_employee is not None:
             key = (int(clinic_for_employee), iso_date)
             clinic_day_base[key] = clinic_day_base.get(key, 0) + 1
-        if eid in absences_by_employee and iso_date in absences_by_employee[eid]:
+        if (
+            eid not in zna_employee_ids
+            and eid in absences_by_employee
+            and iso_date in absences_by_employee[eid]
+        ):
             log(
                 f"Infeasible fixed assignment: employee {eid} is absent on {iso_date} for {slot}."
             )
@@ -244,8 +257,11 @@ def solve_month_schedule(
 
     all_tracked_employees = set(solver_employee_ids)
     all_tracked_employees.update(employee_id for employee_id, _ in employee_day_base.keys())
+    constrained_employees = {
+        employee_id for employee_id in all_tracked_employees if employee_id not in zna_employee_ids
+    }
 
-    for employee_id in all_tracked_employees:
+    for employee_id in constrained_employees:
         for iso_date in dates:
             base = employee_day_base.get((employee_id, iso_date), 0)
             if base > 1:
@@ -262,7 +278,7 @@ def solve_month_schedule(
             if day_vars:
                 model.Add(sum(day_vars) + base <= 1)
 
-    for employee_id in all_tracked_employees:
+    for employee_id in constrained_employees:
         for idx in range(len(dates) - 1):
             d1 = dates[idx]
             d2 = dates[idx + 1]
@@ -287,7 +303,7 @@ def solve_month_schedule(
         if _weekday(iso_date) in (5, 6):
             weekend_groups.setdefault(_weekend_group_key(iso_date), []).append(iso_date)
 
-    for employee_id in all_tracked_employees:
+    for employee_id in constrained_employees:
         worked_weekend_vars: list[cp_model.IntVar] = []
         for group_key, weekend_dates in weekend_groups.items():
             if not weekend_dates:
@@ -306,7 +322,7 @@ def solve_month_schedule(
             model.Add(sum(worked_weekend_vars) <= 2)
 
     one_day_gap_vars: list[cp_model.IntVar] = []
-    for employee_id in all_tracked_employees:
+    for employee_id in constrained_employees:
         for idx in range(len(dates) - 2):
             d1 = dates[idx]
             d3 = dates[idx + 2]
@@ -348,6 +364,8 @@ def solve_month_schedule(
         if weekday in (4, 5):
             continue
         for clinic_value in clinic_ids:
+            if clinic_value in zna_clinic_ids:
+                continue
             base = clinic_day_base.get((clinic_value, iso_date), 0)
             vars_for_clinic: list[cp_model.IntVar] = []
             for slot in SHIFT_SLOT_CODES:
