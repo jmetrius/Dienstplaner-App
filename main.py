@@ -48,6 +48,8 @@ from database import (
     PREFERENCE_LABELS,
     SHIFT_SLOT_CODES,
     SHIFT_SLOT_LABELS,
+    WEEKDAY_CODES,
+    WEEKDAY_LABELS,
     delete_absence,
     delete_employee,
     delete_shift_preference,
@@ -77,9 +79,11 @@ from database import (
 from solver import SolverConfig, SolverResult, SolverSolution, solve_month_schedule
 
 N_QUAL = len(CANONICAL_QUALIFICATIONS)
+N_WEEKDAYS = len(WEEKDAY_CODES)
 COL_NAME = 0
 COL_QUAL_BASE = 1
-COL_CLINIC = COL_QUAL_BASE + N_QUAL
+COL_BLOCKED_BASE = COL_QUAL_BASE + N_QUAL
+COL_CLINIC = COL_BLOCKED_BASE + N_WEEKDAYS
 COL_MAX_SHIFTS = COL_CLINIC + 1
 COL_ACTIVE = COL_MAX_SHIFTS + 1
 N_COLS = COL_ACTIVE + 1
@@ -637,6 +641,7 @@ class EmployeeListPage(QWidget):
         headers = (
             ["Name"]
             + list(CANONICAL_QUALIFICATIONS)
+            + [f"{WEEKDAY_LABELS[d]} verfügbar" for d in WEEKDAY_CODES]
             + ["Klinik", "Max. Schichtanzahl", "Active"]
         )
         self._table = QTableWidget()
@@ -648,11 +653,19 @@ class EmployeeListPage(QWidget):
         self._table.verticalHeader().setVisible(False)
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
-        for c in range(COL_QUAL_BASE, COL_CLINIC):
+        for c in range(COL_QUAL_BASE, COL_QUAL_BASE + N_QUAL):
+            hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        for c in range(COL_BLOCKED_BASE, COL_CLINIC):
             hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(COL_CLINIC, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(COL_MAX_SHIFTS, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(COL_ACTIVE, QHeaderView.ResizeMode.ResizeToContents)
+        for i, weekday in enumerate(WEEKDAY_CODES):
+            item = self._table.horizontalHeaderItem(COL_BLOCKED_BASE + i)
+            if item is not None:
+                item.setToolTip(
+                    f"{WEEKDAY_LABELS[weekday]} availability: checked = available, unchecked = blocked."
+                )
         layout.addWidget(self._table, stretch=1)
 
         self._clinics: list[sqlite3.Row] = []
@@ -665,6 +678,20 @@ class EmployeeListPage(QWidget):
         if raw is None or raw == "":
             return set()
         return {int(x) for x in str(raw).split(",") if x.strip().isdigit()}
+
+    @staticmethod
+    def _parse_weekday_ids(raw: object) -> set[int]:
+        if raw is None or raw == "":
+            return set()
+        out: set[int] = set()
+        for token in str(raw).split(","):
+            token = token.strip()
+            if not token.isdigit():
+                continue
+            day = int(token)
+            if day in WEEKDAY_CODES:
+                out.add(day)
+        return out
 
     def reload(self) -> None:
         conn = get_connection()
@@ -711,6 +738,15 @@ class EmployeeListPage(QWidget):
             boxes.append(cb)
         return boxes[:N_QUAL]
 
+    def _weekday_checkboxes(self, blocked: set[int]) -> list[QCheckBox]:
+        boxes: list[QCheckBox] = []
+        for weekday in WEEKDAY_CODES:
+            cb = QCheckBox()
+            cb.setChecked(weekday not in blocked)
+            cb.setProperty("weekday", weekday)
+            boxes.append(cb)
+        return boxes
+
     def _append_row_from_db(self, emp: sqlite3.Row) -> None:
         r = self._table.rowCount()
         self._table.insertRow(r)
@@ -722,6 +758,10 @@ class EmployeeListPage(QWidget):
         quals = self._parse_qual_ids(emp["qual_ids"])
         for i, chk in enumerate(self._qual_checkboxes(quals)):
             self._table.setCellWidget(r, COL_QUAL_BASE + i, chk)
+
+        blocked_weekdays = self._parse_weekday_ids(emp["blocked_weekdays"])
+        for i, chk in enumerate(self._weekday_checkboxes(blocked_weekdays)):
+            self._table.setCellWidget(r, COL_BLOCKED_BASE + i, chk)
 
         cid = emp["clinic_id"]
         clinic_id = int(cid) if cid is not None else None
@@ -745,6 +785,9 @@ class EmployeeListPage(QWidget):
 
         for i, chk in enumerate(self._qual_checkboxes(set())):
             self._table.setCellWidget(r, COL_QUAL_BASE + i, chk)
+
+        for i, chk in enumerate(self._weekday_checkboxes(set())):
+            self._table.setCellWidget(r, COL_BLOCKED_BASE + i, chk)
 
         self._table.setCellWidget(r, COL_CLINIC, self._make_clinic_combo(None))
 
@@ -781,6 +824,21 @@ class EmployeeListPage(QWidget):
             if qid >= 0:
                 ids.append(qid)
         return ids
+
+    def _collect_blocked_weekdays(self, row: int) -> list[int]:
+        blocked: list[int] = []
+        for i in range(N_WEEKDAYS):
+            w = self._table.cellWidget(row, COL_BLOCKED_BASE + i)
+            if not isinstance(w, QCheckBox):
+                continue
+            raw = w.property("weekday")
+            try:
+                weekday = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if weekday in WEEKDAY_CODES and not w.isChecked():
+                blocked.append(weekday)
+        return blocked
 
     def _save_all(self) -> None:
         if not self._clinics:
@@ -824,6 +882,7 @@ class EmployeeListPage(QWidget):
                 max_shifts = int(w_spin.value())
                 active = w_act.isChecked()
                 qual_ids = self._collect_qualification_ids(r)
+                blocked_weekdays = self._collect_blocked_weekdays(r)
 
                 eid = self._row_employee_id(r)
                 if eid is None:
@@ -834,6 +893,7 @@ class EmployeeListPage(QWidget):
                         active=active,
                         max_shifts_per_month=max_shifts,
                         qualification_ids=qual_ids,
+                        blocked_weekdays=blocked_weekdays,
                     )
                     name_item.setData(Qt.ItemDataRole.UserRole, new_id)
                 else:
@@ -845,6 +905,7 @@ class EmployeeListPage(QWidget):
                         active=active,
                         max_shifts_per_month=max_shifts,
                         qualification_ids=qual_ids,
+                        blocked_weekdays=blocked_weekdays,
                     )
             conn.commit()
         except Exception as exc:  # noqa: BLE001

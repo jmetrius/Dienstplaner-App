@@ -80,6 +80,7 @@ def solve_month_schedule(
     solver_employee_ids: list[int] = []
     employee_max: dict[int, int] = {}
     employee_quals: dict[int, set[str]] = {}
+    employee_blocked_weekdays: dict[int, set[int]] = {}
     for item in employees_raw:
         if not isinstance(item, dict):
             continue
@@ -94,6 +95,14 @@ def solve_month_schedule(
             employee_quals[employee_id] = {str(q) for q in quals}
         else:
             employee_quals[employee_id] = {str(q) for q in quals}
+        blocked_raw = item.get("blocked_weekdays", set())
+        if isinstance(blocked_raw, set):
+            blocked_days = {int(day) for day in blocked_raw}
+        else:
+            blocked_days = {int(day) for day in blocked_raw}
+        employee_blocked_weekdays[employee_id] = {
+            day for day in blocked_days if day >= 0 and day <= 6
+        }
 
     if not dates:
         return SolverResult(
@@ -140,6 +149,17 @@ def solve_month_schedule(
 
     for (iso_date, slot), employee_id in fixed_assignments.items():
         eid = int(employee_id)
+        weekday = _weekday(str(iso_date))
+        if weekday in employee_blocked_weekdays.get(eid, set()):
+            log(
+                f"Infeasible fixed assignment: employee {eid} is blocked on weekday {weekday} ({iso_date}) for {slot}."
+            )
+            return SolverResult(
+                solutions=[],
+                status="infeasible",
+                message="Fixed assignments conflict with blocked weekdays.",
+                logs=logs,
+            )
         employee_day_base[(eid, iso_date)] = employee_day_base.get((eid, iso_date), 0) + 1
         if eid in employee_month_base:
             employee_month_base[eid] += 1
@@ -165,8 +185,11 @@ def solve_month_schedule(
                 continue
             required_quals = set(qualification_names_for_shift_slot(slot))
             candidates: list[int] = []
+            weekday = _weekday(iso_date)
             for employee_id in solver_employee_ids:
                 if required_quals and not (employee_quals.get(employee_id, set()) & required_quals):
+                    continue
+                if weekday in employee_blocked_weekdays.get(employee_id, set()):
                     continue
                 if iso_date in absences_by_employee.get(employee_id, set()):
                     continue

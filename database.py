@@ -78,6 +78,17 @@ PREFERENCE_LABELS: dict[str, str] = {
     "prefer_off": "Keine Schicht",
 }
 
+WEEKDAY_CODES: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6)
+WEEKDAY_LABELS: dict[int, str] = {
+    0: "Mo",
+    1: "Di",
+    2: "Mi",
+    3: "Do",
+    4: "Fr",
+    5: "Sa",
+    6: "So",
+}
+
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
 
@@ -152,6 +163,15 @@ CREATE TABLE IF NOT EXISTS employee_shift_preferences (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pref_employee ON employee_shift_preferences(employee_id);
+
+CREATE TABLE IF NOT EXISTS employee_blocked_weekdays (
+    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+    PRIMARY KEY (employee_id, weekday)
+);
+
+CREATE INDEX IF NOT EXISTS idx_blocked_weekdays_employee
+    ON employee_blocked_weekdays(employee_id);
 """
 
 
@@ -271,6 +291,24 @@ def _migrate_shift_preferences_single_date(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
 
 
+def _migrate_employee_blocked_weekdays(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS employee_blocked_weekdays (
+            employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+            weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+            PRIMARY KEY (employee_id, weekday)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_blocked_weekdays_employee
+        ON employee_blocked_weekdays(employee_id)
+        """
+    )
+
+
 def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
     path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
     conn = sqlite3.connect(path)
@@ -316,11 +354,18 @@ def list_employees(conn: sqlite3.Connection) -> list[sqlite3.Row]:
             e.clinic_id,
             e.max_shifts_per_month,
             c.name AS clinic_name,
-            GROUP_CONCAT(eq.qualification_id) AS qual_ids
+            (
+                SELECT GROUP_CONCAT(eq.qualification_id)
+                FROM employee_qualifications eq
+                WHERE eq.employee_id = e.id
+            ) AS qual_ids,
+            (
+                SELECT GROUP_CONCAT(bw.weekday)
+                FROM employee_blocked_weekdays bw
+                WHERE bw.employee_id = e.id
+            ) AS blocked_weekdays
         FROM employees e
         LEFT JOIN clinics c ON c.id = e.clinic_id
-        LEFT JOIN employee_qualifications eq ON eq.employee_id = e.id
-        GROUP BY e.id
         ORDER BY e.name COLLATE NOCASE
     """
     return list(conn.execute(sql))
@@ -345,6 +390,34 @@ def set_employee_qualifications(
         )
 
 
+def set_employee_blocked_weekdays(
+    conn: sqlite3.Connection,
+    employee_id: int,
+    weekdays: Iterable[int],
+) -> None:
+    conn.execute(
+        "DELETE FROM employee_blocked_weekdays WHERE employee_id = ?",
+        (employee_id,),
+    )
+    normalized_set: set[int] = set()
+    for day in weekdays:
+        try:
+            weekday = int(day)
+        except (TypeError, ValueError):
+            continue
+        if weekday in WEEKDAY_CODES:
+            normalized_set.add(weekday)
+    normalized = sorted(normalized_set)
+    for weekday in normalized:
+        conn.execute(
+            """
+            INSERT INTO employee_blocked_weekdays (employee_id, weekday)
+            VALUES (?, ?)
+            """,
+            (employee_id, weekday),
+        )
+
+
 def insert_employee(
     conn: sqlite3.Connection,
     *,
@@ -353,6 +426,7 @@ def insert_employee(
     active: bool,
     max_shifts_per_month: int,
     qualification_ids: Iterable[int],
+    blocked_weekdays: Iterable[int] = (),
 ) -> int:
     cur = conn.execute(
         """
@@ -363,6 +437,7 @@ def insert_employee(
     )
     eid = int(cur.lastrowid)
     set_employee_qualifications(conn, eid, qualification_ids)
+    set_employee_blocked_weekdays(conn, eid, blocked_weekdays)
     return eid
 
 
@@ -375,6 +450,7 @@ def update_employee(
     active: bool,
     max_shifts_per_month: int,
     qualification_ids: Iterable[int],
+    blocked_weekdays: Iterable[int] = (),
 ) -> None:
     conn.execute(
         """
@@ -385,6 +461,7 @@ def update_employee(
         (name, clinic_id, 1 if active else 0, max_shifts_per_month, employee_id),
     )
     set_employee_qualifications(conn, employee_id, qualification_ids)
+    set_employee_blocked_weekdays(conn, employee_id, blocked_weekdays)
 
 
 def delete_employee(conn: sqlite3.Connection, employee_id: int) -> None:
@@ -753,6 +830,16 @@ def load_solver_month_input(
         employee_clinic_by_id[employee_id] = int(row["clinic_id"])
         employee_name_by_id[employee_id] = str(row["name"])
 
+    blocked_weekdays_by_employee: dict[int, set[int]] = {}
+    for row in conn.execute("SELECT employee_id, weekday FROM employee_blocked_weekdays"):
+        employee_id = int(row["employee_id"])
+        weekday = int(row["weekday"])
+        if weekday in WEEKDAY_CODES:
+            blocked_weekdays_by_employee.setdefault(employee_id, set()).add(weekday)
+    for employee in employees:
+        employee_id = int(employee["id"])
+        employee["blocked_weekdays"] = blocked_weekdays_by_employee.get(employee_id, set())
+
     return {
         "dates": dates,
         "employees": employees,
@@ -857,6 +944,7 @@ def init_database(db_path: str | Path | None = None) -> Path:
         _seed_reference_data(conn)
         _migrate_employees_to_v2(conn)
         _migrate_shift_preferences_single_date(conn)
+        _migrate_employee_blocked_weekdays(conn)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pref_date ON employee_shift_preferences(pref_date)"
         )
