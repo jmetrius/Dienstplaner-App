@@ -36,6 +36,8 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -104,16 +106,15 @@ class AbsencesPreferencesPage(QWidget):
     Rows overlap the selected month (ranges may extend outside it).
     """
 
-    A_COL_ID = 0
-    A_COL_EMP = 1
-    A_COL_START = 2
-    A_COL_END = 3
-    A_COL_CAT = 4
-    A_COL_NOTES = 5
+    A_COL_EMP = 0
+    A_COL_START = 1
+    A_COL_END = 2
+    A_COL_CAT = 3
+    A_COL_NOTES = 4
 
-    P_COL_ID = 0
-    P_COL_EMP = 1
-    P_COL_DATE = 2
+    P_COL_EMP = 0
+    P_COL_START = 1
+    P_COL_END = 2
     P_COL_PREF = 3
     P_COL_NOTES = 4
 
@@ -126,6 +127,11 @@ class AbsencesPreferencesPage(QWidget):
         self._year = today.year
         self._month = today.month
         self._employees: list[sqlite3.Row] = []
+        self._employee_name_by_id: dict[int, str] = {}
+        self._loaded_absence_ids: set[int] = set()
+        self._loaded_preference_ids: set[int] = set()
+        self._abs_parent_by_employee_id: dict[int, QTreeWidgetItem] = {}
+        self._pref_parent_by_employee_id: dict[int, QTreeWidgetItem] = {}
 
         root = QVBoxLayout(self)
         root.setSpacing(10)
@@ -175,8 +181,8 @@ class AbsencesPreferencesPage(QWidget):
 
         hint = QLabel(
             "Absences: ranges that overlap the selected month are listed (ranges may extend "
-            "outside the month). Preferences: one calendar date per row (one shift day); "
-            "use multiple rows for more wishes."
+            "outside the month). Preferences: date ranges are supported and are expanded "
+            "to single days for the solver."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #555;")
@@ -187,8 +193,8 @@ class AbsencesPreferencesPage(QWidget):
         abs_box = QGroupBox("Absences (cannot work — e.g. sick leave, vacation)")
         abs_lay = QVBoxLayout(abs_box)
         abs_bar = QHBoxLayout()
-        self._btn_abs_add = QPushButton("Add")
-        self._btn_abs_del = QPushButton("Delete selected")
+        self._btn_abs_add = QPushButton("Add range")
+        self._btn_abs_del = QPushButton("Delete selected range")
         self._btn_abs_add.clicked.connect(self._add_absence_row)
         self._btn_abs_del.clicked.connect(self._delete_absence_selected)
         abs_bar.addWidget(self._btn_abs_add)
@@ -196,34 +202,30 @@ class AbsencesPreferencesPage(QWidget):
         abs_bar.addStretch(1)
         abs_lay.addLayout(abs_bar)
 
-        self._abs_table = QTableWidget()
-        self._abs_table.setColumnCount(6)
-        self._abs_table.setHorizontalHeaderLabels(
-            ["id", "Employee", "From", "To", "Category", "Notes"]
+        self._abs_tree = QTreeWidget()
+        self._abs_tree.setColumnCount(5)
+        self._abs_tree.setHeaderLabels(
+            ["Employee", "From", "To", "Category", "Notes"]
         )
-        self._abs_table.setColumnHidden(self.A_COL_ID, True)
-        self._abs_table.setAlternatingRowColors(True)
-        self._abs_table.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows
-        )
-        self._abs_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._abs_table.verticalHeader().setVisible(False)
-        ah = self._abs_table.horizontalHeader()
+        self._abs_tree.setAlternatingRowColors(True)
+        self._abs_tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._abs_tree.setRootIsDecorated(True)
+        self._abs_tree.setItemsExpandable(True)
+        self._abs_tree.setUniformRowHeights(False)
+        ah = self._abs_tree.header()
         ah.setSectionResizeMode(self.A_COL_EMP, QHeaderView.ResizeMode.Stretch)
         ah.setSectionResizeMode(self.A_COL_START, QHeaderView.ResizeMode.ResizeToContents)
         ah.setSectionResizeMode(self.A_COL_END, QHeaderView.ResizeMode.ResizeToContents)
         ah.setSectionResizeMode(self.A_COL_CAT, QHeaderView.ResizeMode.ResizeToContents)
         ah.setSectionResizeMode(self.A_COL_NOTES, QHeaderView.ResizeMode.Stretch)
-        abs_lay.addWidget(self._abs_table)
+        abs_lay.addWidget(self._abs_tree)
         splitter.addWidget(abs_box)
 
-        pref_box = QGroupBox(
-            "Shift preferences (one date per wish — add several rows for several days)"
-        )
+        pref_box = QGroupBox("Shift preferences (date ranges)")
         pref_lay = QVBoxLayout(pref_box)
         pref_bar = QHBoxLayout()
-        self._btn_pref_add = QPushButton("Add")
-        self._btn_pref_del = QPushButton("Delete selected")
+        self._btn_pref_add = QPushButton("Add range")
+        self._btn_pref_del = QPushButton("Delete selected range")
         self._btn_pref_add.clicked.connect(self._add_pref_row)
         self._btn_pref_del.clicked.connect(self._delete_pref_selected)
         pref_bar.addWidget(self._btn_pref_add)
@@ -231,24 +233,23 @@ class AbsencesPreferencesPage(QWidget):
         pref_bar.addStretch(1)
         pref_lay.addLayout(pref_bar)
 
-        self._pref_table = QTableWidget()
-        self._pref_table.setColumnCount(5)
-        self._pref_table.setHorizontalHeaderLabels(
-            ["id", "Employee", "Date", "Preference", "Notes"]
+        self._pref_tree = QTreeWidget()
+        self._pref_tree.setColumnCount(5)
+        self._pref_tree.setHeaderLabels(
+            ["Employee", "From", "To", "Preference", "Notes"]
         )
-        self._pref_table.setColumnHidden(self.P_COL_ID, True)
-        self._pref_table.setAlternatingRowColors(True)
-        self._pref_table.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows
-        )
-        self._pref_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._pref_table.verticalHeader().setVisible(False)
-        ph = self._pref_table.horizontalHeader()
+        self._pref_tree.setAlternatingRowColors(True)
+        self._pref_tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._pref_tree.setRootIsDecorated(True)
+        self._pref_tree.setItemsExpandable(True)
+        self._pref_tree.setUniformRowHeights(False)
+        ph = self._pref_tree.header()
         ph.setSectionResizeMode(self.P_COL_EMP, QHeaderView.ResizeMode.Stretch)
-        ph.setSectionResizeMode(self.P_COL_DATE, QHeaderView.ResizeMode.ResizeToContents)
+        ph.setSectionResizeMode(self.P_COL_START, QHeaderView.ResizeMode.ResizeToContents)
+        ph.setSectionResizeMode(self.P_COL_END, QHeaderView.ResizeMode.ResizeToContents)
         ph.setSectionResizeMode(self.P_COL_PREF, QHeaderView.ResizeMode.ResizeToContents)
         ph.setSectionResizeMode(self.P_COL_NOTES, QHeaderView.ResizeMode.Stretch)
-        pref_lay.addWidget(self._pref_table)
+        pref_lay.addWidget(self._pref_tree)
         splitter.addWidget(pref_box)
 
         splitter.setStretchFactor(0, 1)
@@ -298,6 +299,9 @@ class AbsencesPreferencesPage(QWidget):
         conn = get_connection()
         try:
             self._employees = list_employee_options(conn)
+            self._employee_name_by_id = {
+                int(row["id"]): str(row["name"]) for row in self._employees
+            }
             abs_rows = list_absences_overlapping_month(
                 conn, year=self._year, month=self._month
             )
@@ -307,26 +311,38 @@ class AbsencesPreferencesPage(QWidget):
         finally:
             conn.close()
 
-        self._abs_table.setRowCount(0)
+        self._loaded_absence_ids = {int(row["id"]) for row in abs_rows}
+        self._loaded_preference_ids = {int(row["id"]) for row in pref_rows}
+
+        self._abs_tree.clear()
+        self._pref_tree.clear()
+        self._abs_parent_by_employee_id.clear()
+        self._pref_parent_by_employee_id.clear()
+        for employee in self._employees:
+            employee_id = int(employee["id"])
+            employee_name = str(employee["name"])
+            self._abs_parent_by_employee_id[employee_id] = self._make_parent_item(
+                self._abs_tree, employee_id, employee_name
+            )
+            self._pref_parent_by_employee_id[employee_id] = self._make_parent_item(
+                self._pref_tree, employee_id, employee_name
+            )
+
         for ar in abs_rows:
             self._append_absence_row(ar)
-
-        self._pref_table.setRowCount(0)
         for pr in pref_rows:
             self._append_preference_row(pr)
+        self._refresh_parent_summaries(self._abs_parent_by_employee_id, self._abs_tree)
+        self._refresh_parent_summaries(self._pref_parent_by_employee_id, self._pref_tree)
 
-    def _make_employee_combo(self, current_id: int | None) -> QComboBox:
-        cb = QComboBox()
-        cb.addItem("—", None)
-        for e in self._employees:
-            cb.addItem(str(e["name"]), int(e["id"]))
-        if current_id is not None:
-            for i in range(cb.count()):
-                d = cb.itemData(i)
-                if d is not None and int(d) == current_id:
-                    cb.setCurrentIndex(i)
-                    break
-        return cb
+    def _make_parent_item(
+        self, tree: QTreeWidget, employee_id: int, employee_name: str
+    ) -> QTreeWidgetItem:
+        parent = QTreeWidgetItem([employee_name, "", "", "", ""])
+        parent.setData(self.A_COL_EMP, Qt.ItemDataRole.UserRole, employee_id)
+        tree.addTopLevelItem(parent)
+        parent.setExpanded(False)
+        return parent
 
     def _make_category_combo(self, current: str) -> QComboBox:
         cb = QComboBox()
@@ -357,21 +373,21 @@ class AbsencesPreferencesPage(QWidget):
             return QDate(td.year, td.month, td.day)
         return QDate(self._year, self._month, 1)
 
+    def _default_pref_dates(self) -> tuple[QDate, QDate]:
+        d = self._default_pref_date()
+        return d, d
+
     def _append_absence_row(self, row: sqlite3.Row | None) -> None:
-        r = self._abs_table.rowCount()
-        self._abs_table.insertRow(r)
-        id_it = QTableWidgetItem("")
-        if row is not None:
-            id_it.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
-        else:
-            id_it.setData(Qt.ItemDataRole.UserRole, None)
-        self._abs_table.setItem(r, self.A_COL_ID, id_it)
-
-        eid = int(row["employee_id"]) if row is not None else None
-        self._abs_table.setCellWidget(
-            r, self.A_COL_EMP, self._make_employee_combo(eid)
-        )
-
+        if row is None:
+            return
+        employee_id = int(row["employee_id"])
+        parent = self._abs_parent_by_employee_id.get(employee_id)
+        if parent is None:
+            return
+        child = QTreeWidgetItem(["", "", "", "", ""])
+        child.setData(self.A_COL_EMP, Qt.ItemDataRole.UserRole, int(row["id"]))
+        parent.addChild(child)
+        child.setText(self.A_COL_EMP, "  -")
         d_start, d_end = self._default_month_dates()
         de_s = QDateEdit()
         de_s.setCalendarPopup(True)
@@ -379,54 +395,58 @@ class AbsencesPreferencesPage(QWidget):
         de_e = QDateEdit()
         de_e.setCalendarPopup(True)
         de_e.setDisplayFormat("yyyy-MM-dd")
-        if row is not None:
-            de_s.setDate(_qdate_from_iso(str(row["start_date"])))
-            de_e.setDate(_qdate_from_iso(str(row["end_date"])))
-        else:
-            de_s.setDate(d_start)
-            de_e.setDate(d_end)
-        self._abs_table.setCellWidget(r, self.A_COL_START, de_s)
-        self._abs_table.setCellWidget(r, self.A_COL_END, de_e)
+        de_s.setDate(_qdate_from_iso(str(row["start_date"])))
+        de_e.setDate(_qdate_from_iso(str(row["end_date"])))
+        self._abs_tree.setItemWidget(child, self.A_COL_START, de_s)
+        self._abs_tree.setItemWidget(child, self.A_COL_END, de_e)
 
-        cat = str(row["category"]) if row is not None else "other"
-        self._abs_table.setCellWidget(
-            r, self.A_COL_CAT, self._make_category_combo(cat)
-        )
+        cat = str(row["category"])
+        self._abs_tree.setItemWidget(child, self.A_COL_CAT, self._make_category_combo(cat))
 
-        notes = str(row["notes"] or "") if row is not None else ""
-        self._abs_table.setCellWidget(r, self.A_COL_NOTES, QLineEdit(notes))
+        notes = str(row["notes"] or "")
+        self._abs_tree.setItemWidget(child, self.A_COL_NOTES, QLineEdit(notes))
 
     def _append_preference_row(self, row: sqlite3.Row | None) -> None:
-        r = self._pref_table.rowCount()
-        self._pref_table.insertRow(r)
-        id_it = QTableWidgetItem("")
-        if row is not None:
-            id_it.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
-        else:
-            id_it.setData(Qt.ItemDataRole.UserRole, None)
-        self._pref_table.setItem(r, self.P_COL_ID, id_it)
+        if row is None:
+            return
+        employee_id = int(row["employee_id"])
+        parent = self._pref_parent_by_employee_id.get(employee_id)
+        if parent is None:
+            return
+        child = QTreeWidgetItem(["", "", "", "", ""])
+        child.setData(self.P_COL_EMP, Qt.ItemDataRole.UserRole, int(row["id"]))
+        parent.addChild(child)
+        child.setText(self.P_COL_EMP, "  -")
 
-        eid = int(row["employee_id"]) if row is not None else None
-        self._pref_table.setCellWidget(
-            r, self.P_COL_EMP, self._make_employee_combo(eid)
+        de_s = QDateEdit()
+        de_s.setCalendarPopup(True)
+        de_s.setDisplayFormat("yyyy-MM-dd")
+        de_e = QDateEdit()
+        de_e.setCalendarPopup(True)
+        de_e.setDisplayFormat("yyyy-MM-dd")
+        de_s.setDate(_qdate_from_iso(str(row["start_date"])))
+        de_e.setDate(_qdate_from_iso(str(row["end_date"])))
+        self._pref_tree.setItemWidget(child, self.P_COL_START, de_s)
+        self._pref_tree.setItemWidget(child, self.P_COL_END, de_e)
+
+        pref = str(row["preference"])
+        self._pref_tree.setItemWidget(
+            child, self.P_COL_PREF, self._make_preference_combo(pref)
         )
 
-        de = QDateEdit()
-        de.setCalendarPopup(True)
-        de.setDisplayFormat("yyyy-MM-dd")
-        if row is not None:
-            de.setDate(_qdate_from_iso(str(row["pref_date"])))
-        else:
-            de.setDate(self._default_pref_date())
-        self._pref_table.setCellWidget(r, self.P_COL_DATE, de)
+        notes = str(row["notes"] or "")
+        self._pref_tree.setItemWidget(child, self.P_COL_NOTES, QLineEdit(notes))
 
-        pref = str(row["preference"]) if row is not None else "prefer_off"
-        self._pref_table.setCellWidget(
-            r, self.P_COL_PREF, self._make_preference_combo(pref)
-        )
-
-        notes = str(row["notes"] or "") if row is not None else ""
-        self._pref_table.setCellWidget(r, self.P_COL_NOTES, QLineEdit(notes))
+    def _refresh_parent_summaries(
+        self, parent_map: dict[int, QTreeWidgetItem], tree: QTreeWidget
+    ) -> None:
+        for parent in parent_map.values():
+            count = parent.childCount()
+            parent.setText(1, f"{count} range(s)")
+            parent.setText(2, "")
+            parent.setText(3, "")
+            parent.setText(4, "")
+        tree.sortItems(0, Qt.SortOrder.AscendingOrder)
 
     def _add_absence_row(self) -> None:
         if not self._employees:
@@ -436,7 +456,32 @@ class AbsencesPreferencesPage(QWidget):
                 "Add employees on the Employees tab first.",
             )
             return
-        self._append_absence_row(None)
+        item = self._abs_tree.currentItem()
+        parent = item if item and item.parent() is None else item.parent() if item else None
+        if parent is None:
+            parent = self._abs_tree.topLevelItem(0)
+            if parent is None:
+                return
+
+        child = QTreeWidgetItem(["  -", "", "", "", ""])
+        child.setData(self.A_COL_EMP, Qt.ItemDataRole.UserRole, None)
+        parent.addChild(child)
+        parent.setExpanded(True)
+        d_start, d_end = self._default_month_dates()
+        de_s = QDateEdit()
+        de_s.setCalendarPopup(True)
+        de_s.setDisplayFormat("yyyy-MM-dd")
+        de_s.setDate(d_start)
+        de_e = QDateEdit()
+        de_e.setCalendarPopup(True)
+        de_e.setDisplayFormat("yyyy-MM-dd")
+        de_e.setDate(d_end)
+        self._abs_tree.setItemWidget(child, self.A_COL_START, de_s)
+        self._abs_tree.setItemWidget(child, self.A_COL_END, de_e)
+        self._abs_tree.setItemWidget(child, self.A_COL_CAT, self._make_category_combo("other"))
+        self._abs_tree.setItemWidget(child, self.A_COL_NOTES, QLineEdit(""))
+        self._abs_tree.setCurrentItem(child)
+        self._refresh_parent_summaries(self._abs_parent_by_employee_id, self._abs_tree)
 
     def _add_pref_row(self) -> None:
         if not self._employees:
@@ -446,97 +491,152 @@ class AbsencesPreferencesPage(QWidget):
                 "Add employees on the Employees tab first.",
             )
             return
-        self._append_preference_row(None)
+        item = self._pref_tree.currentItem()
+        parent = item if item and item.parent() is None else item.parent() if item else None
+        if parent is None:
+            parent = self._pref_tree.topLevelItem(0)
+            if parent is None:
+                return
 
-    def _row_record_id(self, table: QTableWidget, col: int, row: int) -> int | None:
-        it = table.item(row, col)
-        if it is None:
-            return None
-        v = it.data(Qt.ItemDataRole.UserRole)
-        return int(v) if v is not None else None
+        child = QTreeWidgetItem(["  -", "", "", "", ""])
+        child.setData(self.P_COL_EMP, Qt.ItemDataRole.UserRole, None)
+        parent.addChild(child)
+        parent.setExpanded(True)
+        d_start, d_end = self._default_pref_dates()
+        de_s = QDateEdit()
+        de_s.setCalendarPopup(True)
+        de_s.setDisplayFormat("yyyy-MM-dd")
+        de_s.setDate(d_start)
+        de_e = QDateEdit()
+        de_e.setCalendarPopup(True)
+        de_e.setDisplayFormat("yyyy-MM-dd")
+        de_e.setDate(d_end)
+        self._pref_tree.setItemWidget(child, self.P_COL_START, de_s)
+        self._pref_tree.setItemWidget(child, self.P_COL_END, de_e)
+        self._pref_tree.setItemWidget(
+            child, self.P_COL_PREF, self._make_preference_combo("prefer_off")
+        )
+        self._pref_tree.setItemWidget(child, self.P_COL_NOTES, QLineEdit(""))
+        self._pref_tree.setCurrentItem(child)
+        self._refresh_parent_summaries(self._pref_parent_by_employee_id, self._pref_tree)
+
+    @staticmethod
+    def _item_record_id(item: QTreeWidgetItem, col: int) -> int | None:
+        raw = item.data(col, Qt.ItemDataRole.UserRole)
+        return int(raw) if raw is not None else None
 
     def _persist_absences_to_conn(self, conn: sqlite3.Connection) -> str | None:
         if not self._employees:
             return "No employees defined."
-        for r in range(self._abs_table.rowCount()):
-            w_emp = self._abs_table.cellWidget(r, self.A_COL_EMP)
-            w_s = self._abs_table.cellWidget(r, self.A_COL_START)
-            w_e = self._abs_table.cellWidget(r, self.A_COL_END)
-            w_cat = self._abs_table.cellWidget(r, self.A_COL_CAT)
-            w_notes = self._abs_table.cellWidget(r, self.A_COL_NOTES)
-            if (
-                not isinstance(w_emp, QComboBox)
-                or not isinstance(w_s, QDateEdit)
-                or not isinstance(w_e, QDateEdit)
-                or not isinstance(w_cat, QComboBox)
-                or not isinstance(w_notes, QLineEdit)
-            ):
-                continue
-            raw_e = w_emp.currentData()
-            if raw_e is None:
-                continue
-            emp_id = int(raw_e)
-            start = _iso_from_qdate(w_s.date())
-            end = _iso_from_qdate(w_e.date())
-            if start > end:
-                return (
-                    "Absences: end date must be on or after the start date "
-                    f"(row {r + 1})."
-                )
-            cat_raw = w_cat.currentData()
-            category = str(cat_raw) if cat_raw is not None else "other"
-            notes = w_notes.text().strip() or None
-            rid = self._row_record_id(self._abs_table, self.A_COL_ID, r)
-            if rid is None:
-                insert_absence(
-                    conn,
-                    employee_id=emp_id,
-                    start_date=start,
-                    end_date=end,
-                    category=category,
-                    notes=notes,
-                )
-            else:
-                update_absence(
-                    conn,
-                    rid,
-                    employee_id=emp_id,
-                    start_date=start,
-                    end_date=end,
-                    category=category,
-                    notes=notes,
-                )
+        seen_ids: set[int] = set()
+        for employee_id, parent in self._abs_parent_by_employee_id.items():
+            for i in range(parent.childCount()):
+                child = parent.child(i)
+                w_s = self._abs_tree.itemWidget(child, self.A_COL_START)
+                w_e = self._abs_tree.itemWidget(child, self.A_COL_END)
+                w_cat = self._abs_tree.itemWidget(child, self.A_COL_CAT)
+                w_notes = self._abs_tree.itemWidget(child, self.A_COL_NOTES)
+                if (
+                    not isinstance(w_s, QDateEdit)
+                    or not isinstance(w_e, QDateEdit)
+                    or not isinstance(w_cat, QComboBox)
+                    or not isinstance(w_notes, QLineEdit)
+                ):
+                    continue
+                start = _iso_from_qdate(w_s.date())
+                end = _iso_from_qdate(w_e.date())
+                if start > end:
+                    return (
+                        "Absences: end date must be on or after the start date "
+                        f"(employee {self._employee_name_by_id.get(employee_id, employee_id)})."
+                    )
+                cat_raw = w_cat.currentData()
+                category = str(cat_raw) if cat_raw is not None else "other"
+                notes = w_notes.text().strip() or None
+                rid = self._item_record_id(child, self.A_COL_EMP)
+                if rid is None:
+                    insert_absence(
+                        conn,
+                        employee_id=employee_id,
+                        start_date=start,
+                        end_date=end,
+                        category=category,
+                        notes=notes,
+                    )
+                else:
+                    update_absence(
+                        conn,
+                        rid,
+                        employee_id=employee_id,
+                        start_date=start,
+                        end_date=end,
+                        category=category,
+                        notes=notes,
+                    )
+                    seen_ids.add(rid)
+        for deleted_id in sorted(self._loaded_absence_ids - seen_ids):
+            delete_absence(conn, deleted_id)
         return None
 
     def _persist_preferences_to_conn(self, conn: sqlite3.Connection) -> str | None:
         if not self._employees:
             return "No employees defined."
-        for r in range(self._pref_table.rowCount()):
-            w_emp = self._pref_table.cellWidget(r, self.P_COL_EMP)
-            w_d = self._pref_table.cellWidget(r, self.P_COL_DATE)
-            w_pf = self._pref_table.cellWidget(r, self.P_COL_PREF)
-            w_notes = self._pref_table.cellWidget(r, self.P_COL_NOTES)
-            if (
-                not isinstance(w_emp, QComboBox)
-                or not isinstance(w_d, QDateEdit)
-                or not isinstance(w_pf, QComboBox)
-                or not isinstance(w_notes, QLineEdit)
-            ):
-                continue
-            raw_e = w_emp.currentData()
-            if raw_e is None:
-                continue
-            emp_id = int(raw_e)
-            pref_date = _iso_from_qdate(w_d.date())
-            p_raw = w_pf.currentData()
-            preference = str(p_raw) if p_raw is not None else "prefer_off"
-            notes = w_notes.text().strip() or None
-            rid = self._row_record_id(self._pref_table, self.P_COL_ID, r)
+        prepared_rows: list[tuple[int | None, int, str, str, str, str | None]] = []
+        per_employee_ranges: dict[int, list[tuple[str, str, str]]] = {}
+        for employee_id, parent in self._pref_parent_by_employee_id.items():
+            for i in range(parent.childCount()):
+                child = parent.child(i)
+                w_s = self._pref_tree.itemWidget(child, self.P_COL_START)
+                w_e = self._pref_tree.itemWidget(child, self.P_COL_END)
+                w_pf = self._pref_tree.itemWidget(child, self.P_COL_PREF)
+                w_notes = self._pref_tree.itemWidget(child, self.P_COL_NOTES)
+                if (
+                    not isinstance(w_s, QDateEdit)
+                    or not isinstance(w_e, QDateEdit)
+                    or not isinstance(w_pf, QComboBox)
+                    or not isinstance(w_notes, QLineEdit)
+                ):
+                    continue
+                start = _iso_from_qdate(w_s.date())
+                end = _iso_from_qdate(w_e.date())
+                if start > end:
+                    return (
+                        "Preferences: end date must be on or after the start date "
+                        f"(employee {self._employee_name_by_id.get(employee_id, employee_id)})."
+                    )
+                p_raw = w_pf.currentData()
+                preference = str(p_raw) if p_raw is not None else "prefer_off"
+                notes = w_notes.text().strip() or None
+                rid = self._item_record_id(child, self.P_COL_EMP)
+                prepared_rows.append((rid, employee_id, start, end, preference, notes))
+                per_employee_ranges.setdefault(employee_id, []).append(
+                    (start, end, preference)
+                )
+
+        for employee_id, ranges in per_employee_ranges.items():
+            for i in range(len(ranges)):
+                left_start, left_end, left_pref = ranges[i]
+                for j in range(i + 1, len(ranges)):
+                    right_start, right_end, right_pref = ranges[j]
+                    overlaps = left_start <= right_end and right_start <= left_end
+                    if overlaps and left_pref != right_pref:
+                        employee_name = self._employee_name_by_id.get(
+                            employee_id, f"#{employee_id}"
+                        )
+                        return (
+                            "Preferences: overlapping ranges with conflicting values are "
+                            f"not allowed ({employee_name}: {left_start}..{left_end} vs "
+                            f"{right_start}..{right_end})."
+                        )
+
+        seen_ids: set[int] = set()
+        for rid, employee_id, start, end, preference, notes in prepared_rows:
             if rid is None:
                 insert_shift_preference(
                     conn,
-                    employee_id=emp_id,
-                    pref_date=pref_date,
+                    employee_id=employee_id,
+                    start_date=start,
+                    end_date=end,
                     preference=preference,
                     notes=notes,
                 )
@@ -544,11 +644,15 @@ class AbsencesPreferencesPage(QWidget):
                 update_shift_preference(
                     conn,
                     rid,
-                    employee_id=emp_id,
-                    pref_date=pref_date,
+                    employee_id=employee_id,
+                    start_date=start,
+                    end_date=end,
                     preference=preference,
                     notes=notes,
                 )
+                seen_ids.add(rid)
+        for deleted_id in sorted(self._loaded_preference_ids - seen_ids):
+            delete_shift_preference(conn, deleted_id)
         return None
 
     def _save_all_sections(self) -> None:
@@ -574,60 +678,24 @@ class AbsencesPreferencesPage(QWidget):
         self.reload()
 
     def _delete_absence_selected(self) -> None:
-        row = self._abs_table.currentRow()
-        if row < 0:
-            QMessageBox.information(self, "Delete", "Select a row to delete.")
+        item = self._abs_tree.currentItem()
+        if item is None or item.parent() is None:
+            QMessageBox.information(self, "Delete", "Select an absence range to delete.")
             return
-        rid = self._row_record_id(self._abs_table, self.A_COL_ID, row)
-        if rid is not None:
-            reply = QMessageBox.question(
-                self,
-                "Delete absence",
-                "Remove this absence from the database?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-            conn = get_connection()
-            try:
-                delete_absence(conn, rid)
-                conn.commit()
-            except Exception as exc:  # noqa: BLE001
-                conn.rollback()
-                QMessageBox.critical(self, "Delete failed", str(exc))
-                return
-            finally:
-                conn.close()
-        self._abs_table.removeRow(row)
+        parent = item.parent()
+        parent.removeChild(item)
+        self._refresh_parent_summaries(self._abs_parent_by_employee_id, self._abs_tree)
 
     def _delete_pref_selected(self) -> None:
-        row = self._pref_table.currentRow()
-        if row < 0:
-            QMessageBox.information(self, "Delete", "Select a row to delete.")
-            return
-        rid = self._row_record_id(self._pref_table, self.P_COL_ID, row)
-        if rid is not None:
-            reply = QMessageBox.question(
-                self,
-                "Delete preference",
-                "Remove this preference from the database?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+        item = self._pref_tree.currentItem()
+        if item is None or item.parent() is None:
+            QMessageBox.information(
+                self, "Delete", "Select a preference range to delete."
             )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-            conn = get_connection()
-            try:
-                delete_shift_preference(conn, rid)
-                conn.commit()
-            except Exception as exc:  # noqa: BLE001
-                conn.rollback()
-                QMessageBox.critical(self, "Delete failed", str(exc))
-                return
-            finally:
-                conn.close()
-        self._pref_table.removeRow(row)
+            return
+        parent = item.parent()
+        parent.removeChild(item)
+        self._refresh_parent_summaries(self._pref_parent_by_employee_id, self._pref_tree)
 
 
 class EmployeeListPage(QWidget):

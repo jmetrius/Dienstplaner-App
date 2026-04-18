@@ -156,10 +156,13 @@ CREATE INDEX IF NOT EXISTS idx_absences_range ON employee_absences(start_date, e
 CREATE TABLE IF NOT EXISTS employee_shift_preferences (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
-    pref_date TEXT NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
     preference TEXT NOT NULL CHECK (preference IN ('prefer_work', 'prefer_off')),
     notes TEXT,
-    CHECK (pref_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')
+    CHECK (start_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    CHECK (end_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    CHECK (start_date <= end_date)
 );
 
 CREATE INDEX IF NOT EXISTS idx_pref_employee ON employee_shift_preferences(employee_id);
@@ -246,7 +249,7 @@ def _migrate_employees_to_v2(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
 
 
-def _migrate_shift_preferences_single_date(conn: sqlite3.Connection) -> None:
+def _migrate_shift_preferences_to_ranges(conn: sqlite3.Connection) -> None:
     exists = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='employee_shift_preferences'"
     ).fetchone()
@@ -255,9 +258,9 @@ def _migrate_shift_preferences_single_date(conn: sqlite3.Connection) -> None:
     cols = {
         r[1] for r in conn.execute("PRAGMA table_info(employee_shift_preferences)").fetchall()
     }
-    if "pref_date" in cols:
+    if "start_date" in cols and "end_date" in cols:
         return
-    if "start_date" not in cols:
+    if "pref_date" not in cols:
         return
 
     conn.execute("PRAGMA foreign_keys = OFF")
@@ -266,17 +269,21 @@ def _migrate_shift_preferences_single_date(conn: sqlite3.Connection) -> None:
         CREATE TABLE employee_shift_preferences_new (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
-            pref_date TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
             preference TEXT NOT NULL CHECK (preference IN ('prefer_work', 'prefer_off')),
             notes TEXT,
-            CHECK (pref_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')
+            CHECK (start_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+            CHECK (end_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+            CHECK (start_date <= end_date)
         )
         """
     )
     conn.execute(
         """
-        INSERT INTO employee_shift_preferences_new (id, employee_id, pref_date, preference, notes)
-        SELECT id, employee_id, start_date, preference, notes
+        INSERT INTO employee_shift_preferences_new
+            (id, employee_id, start_date, end_date, preference, notes)
+        SELECT id, employee_id, pref_date, pref_date, preference, notes
         FROM employee_shift_preferences
         """
     )
@@ -286,7 +293,7 @@ def _migrate_shift_preferences_single_date(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_pref_employee ON employee_shift_preferences(employee_id)"
     )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_pref_date ON employee_shift_preferences(pref_date)"
+        "CREATE INDEX IF NOT EXISTS idx_pref_range ON employee_shift_preferences(start_date, end_date)"
     )
     conn.execute("PRAGMA foreign_keys = ON")
 
@@ -514,15 +521,16 @@ def list_preferences_overlapping_month(
             p.id,
             p.employee_id,
             e.name AS employee_name,
-            p.pref_date,
+            p.start_date,
+            p.end_date,
             p.preference,
             p.notes
         FROM employee_shift_preferences p
         INNER JOIN employees e ON e.id = p.employee_id
-        WHERE p.pref_date >= ? AND p.pref_date <= ?
-        ORDER BY p.pref_date, e.name COLLATE NOCASE
+        WHERE p.start_date <= ? AND p.end_date >= ?
+        ORDER BY p.start_date, e.name COLLATE NOCASE
     """
-    return list(conn.execute(sql, (month_start, month_end)))
+    return list(conn.execute(sql, (month_end, month_start)))
 
 
 def insert_absence(
@@ -573,17 +581,18 @@ def insert_shift_preference(
     conn: sqlite3.Connection,
     *,
     employee_id: int,
-    pref_date: str,
+    start_date: str,
+    end_date: str,
     preference: str,
     notes: str | None,
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO employee_shift_preferences
-            (employee_id, pref_date, preference, notes)
-        VALUES (?, ?, ?, ?)
+            (employee_id, start_date, end_date, preference, notes)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (employee_id, pref_date, preference, notes or None),
+        (employee_id, start_date, end_date, preference, notes or None),
     )
     return int(cur.lastrowid)
 
@@ -593,17 +602,18 @@ def update_shift_preference(
     pref_id: int,
     *,
     employee_id: int,
-    pref_date: str,
+    start_date: str,
+    end_date: str,
     preference: str,
     notes: str | None,
 ) -> None:
     conn.execute(
         """
         UPDATE employee_shift_preferences
-        SET employee_id = ?, pref_date = ?, preference = ?, notes = ?
+        SET employee_id = ?, start_date = ?, end_date = ?, preference = ?, notes = ?
         WHERE id = ?
         """,
-        (employee_id, pref_date, preference, notes or None, pref_id),
+        (employee_id, start_date, end_date, preference, notes or None, pref_id),
     )
 
 
@@ -819,9 +829,16 @@ def load_solver_month_input(
 
     preferences: dict[tuple[int, str], str] = {}
     for row in list_preferences_overlapping_month(conn, year=year, month=month):
-        preferences[(int(row["employee_id"]), str(row["pref_date"]))] = str(
-            row["preference"]
-        )
+        employee_id = int(row["employee_id"])
+        start_y, start_m, start_d = (int(x) for x in str(row["start_date"]).split("-", 2))
+        end_y, end_m, end_d = (int(x) for x in str(row["end_date"]).split("-", 2))
+        p_start = date(start_y, start_m, start_d)
+        p_end = date(end_y, end_m, end_d)
+        cur = max(month_start, p_start)
+        end = min(month_end, p_end)
+        while cur <= end:
+            preferences[(employee_id, cur.isoformat())] = str(row["preference"])
+            cur += timedelta(days=1)
 
     employee_clinic_by_id: dict[int, int] = {}
     employee_name_by_id: dict[int, str] = {}
@@ -943,10 +960,10 @@ def init_database(db_path: str | Path | None = None) -> Path:
         _migrate_shifts_shift_slot(conn)
         _seed_reference_data(conn)
         _migrate_employees_to_v2(conn)
-        _migrate_shift_preferences_single_date(conn)
+        _migrate_shift_preferences_to_ranges(conn)
         _migrate_employee_blocked_weekdays(conn)
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pref_date ON employee_shift_preferences(pref_date)"
+            "CREATE INDEX IF NOT EXISTS idx_pref_range ON employee_shift_preferences(start_date, end_date)"
         )
         conn.commit()
     finally:
