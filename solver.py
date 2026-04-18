@@ -79,6 +79,9 @@ def solve_month_schedule(
     absences_by_employee = dict(solver_input.get("absences_by_employee", {}))
     preferences = dict(solver_input.get("preferences", {}))
     employee_clinic_by_id = dict(solver_input.get("employee_clinic_by_id", {}))
+    same_day_incompatible_raw = list(
+        solver_input.get("same_day_incompatible_pairs", [])
+    )
 
     active_employee_ids: list[int] = []
     solver_employee_ids: list[int] = []
@@ -130,6 +133,16 @@ def solve_month_schedule(
             message="No solver-eligible employees (clinic 'ZNA' is manual-only).",
             logs=logs,
         )
+
+    same_day_incompatible_pairs: set[tuple[int, int]] = set()
+    for entry in same_day_incompatible_raw:
+        if not isinstance(entry, tuple) or len(entry) != 2:
+            continue
+        left, right = int(entry[0]), int(entry[1])
+        if left == right:
+            continue
+        pair = (left, right) if left < right else (right, left)
+        same_day_incompatible_pairs.add(pair)
 
     model = cp_model.CpModel()
     variables: dict[tuple[str, str, int], cp_model.IntVar] = {}
@@ -301,6 +314,25 @@ def solve_month_schedule(
             expr1 = sum(employee_day_vars.get((employee_id, d1), [])) + base1
             expr2 = sum(employee_day_vars.get((employee_id, d2), [])) + base2
             model.Add(expr1 + expr2 <= 1)
+
+    for employee_a, employee_b in sorted(same_day_incompatible_pairs):
+        for iso_date in dates:
+            base_a = employee_day_base.get((employee_a, iso_date), 0)
+            base_b = employee_day_base.get((employee_b, iso_date), 0)
+            if base_a >= 1 and base_b >= 1:
+                log(
+                    "Infeasible fixed data: same-day incompatible employees "
+                    f"{employee_a} and {employee_b} both work on {iso_date}."
+                )
+                return SolverResult(
+                    solutions=[],
+                    status="infeasible",
+                    message="Fixed assignments violate same-day employee incompatibility.",
+                    logs=logs,
+                )
+            expr_a = sum(employee_day_vars.get((employee_a, iso_date), [])) + base_a
+            expr_b = sum(employee_day_vars.get((employee_b, iso_date), [])) + base_b
+            model.Add(expr_a + expr_b <= 1)
 
     weekend_groups: dict[tuple[int, int], list[str]] = {}
     for iso_date in dates:

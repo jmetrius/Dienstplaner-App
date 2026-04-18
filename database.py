@@ -175,6 +175,16 @@ CREATE TABLE IF NOT EXISTS employee_blocked_weekdays (
 
 CREATE INDEX IF NOT EXISTS idx_blocked_weekdays_employee
     ON employee_blocked_weekdays(employee_id);
+
+CREATE TABLE IF NOT EXISTS employee_same_day_exclusions (
+    employee_id_a INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    employee_id_b INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    CHECK (employee_id_a < employee_id_b),
+    PRIMARY KEY (employee_id_a, employee_id_b)
+);
+
+CREATE INDEX IF NOT EXISTS idx_same_day_exclusions_b
+    ON employee_same_day_exclusions(employee_id_b);
 """
 
 
@@ -316,6 +326,25 @@ def _migrate_employee_blocked_weekdays(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_employee_same_day_exclusions(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS employee_same_day_exclusions (
+            employee_id_a INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+            employee_id_b INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+            CHECK (employee_id_a < employee_id_b),
+            PRIMARY KEY (employee_id_a, employee_id_b)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_same_day_exclusions_b
+        ON employee_same_day_exclusions(employee_id_b)
+        """
+    )
+
+
 def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
     path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
     conn = sqlite3.connect(path)
@@ -370,7 +399,17 @@ def list_employees(conn: sqlite3.Connection) -> list[sqlite3.Row]:
                 SELECT GROUP_CONCAT(bw.weekday)
                 FROM employee_blocked_weekdays bw
                 WHERE bw.employee_id = e.id
-            ) AS blocked_weekdays
+            ) AS blocked_weekdays,
+            (
+                SELECT GROUP_CONCAT(
+                    CASE
+                        WHEN se.employee_id_a = e.id THEN se.employee_id_b
+                        ELSE se.employee_id_a
+                    END
+                )
+                FROM employee_same_day_exclusions se
+                WHERE se.employee_id_a = e.id OR se.employee_id_b = e.id
+            ) AS same_day_excluded_employee_ids
         FROM employees e
         LEFT JOIN clinics c ON c.id = e.clinic_id
         ORDER BY e.name COLLATE NOCASE
@@ -422,6 +461,45 @@ def set_employee_blocked_weekdays(
             VALUES (?, ?)
             """,
             (employee_id, weekday),
+        )
+
+
+def list_employee_same_day_exclusions(conn: sqlite3.Connection) -> list[tuple[int, int]]:
+    rows = conn.execute(
+        """
+        SELECT employee_id_a, employee_id_b
+        FROM employee_same_day_exclusions
+        ORDER BY employee_id_a, employee_id_b
+        """
+    )
+    out: list[tuple[int, int]] = []
+    for row in rows:
+        out.append((int(row["employee_id_a"]), int(row["employee_id_b"])))
+    return out
+
+
+def replace_employee_same_day_exclusions(
+    conn: sqlite3.Connection, pairs: Iterable[tuple[int, int]]
+) -> None:
+    conn.execute("DELETE FROM employee_same_day_exclusions")
+    normalized: set[tuple[int, int]] = set()
+    for left_raw, right_raw in pairs:
+        try:
+            left = int(left_raw)
+            right = int(right_raw)
+        except (TypeError, ValueError):
+            continue
+        if left == right:
+            continue
+        a, b = (left, right) if left < right else (right, left)
+        normalized.add((a, b))
+    for a, b in sorted(normalized):
+        conn.execute(
+            """
+            INSERT INTO employee_same_day_exclusions (employee_id_a, employee_id_b)
+            VALUES (?, ?)
+            """,
+            (a, b),
         )
 
 
@@ -775,6 +853,7 @@ def load_solver_month_input(
       - external_assignments_by_date: dict[date_iso, list[(employee_id, clinic_id)]]
       - absences_by_employee: dict[employee_id, set[date_iso]]
       - preferences: dict[(employee_id, date_iso), preference_code]
+      - same_day_incompatible_pairs: list[(employee_id_a, employee_id_b)]
     """
     _, days_in_month = calendar.monthrange(year, month)
     dates = [f"{year:04d}-{month:02d}-{d:02d}" for d in range(1, days_in_month + 1)]
@@ -856,6 +935,7 @@ def load_solver_month_input(
     for employee in employees:
         employee_id = int(employee["id"])
         employee["blocked_weekdays"] = blocked_weekdays_by_employee.get(employee_id, set())
+    same_day_incompatible_pairs = list_employee_same_day_exclusions(conn)
 
     return {
         "dates": dates,
@@ -866,6 +946,7 @@ def load_solver_month_input(
         "preferences": preferences,
         "employee_clinic_by_id": employee_clinic_by_id,
         "employee_name_by_id": employee_name_by_id,
+        "same_day_incompatible_pairs": same_day_incompatible_pairs,
     }
 
 
@@ -962,6 +1043,7 @@ def init_database(db_path: str | Path | None = None) -> Path:
         _migrate_employees_to_v2(conn)
         _migrate_shift_preferences_to_ranges(conn)
         _migrate_employee_blocked_weekdays(conn)
+        _migrate_employee_same_day_exclusions(conn)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pref_range ON employee_shift_preferences(start_date, end_date)"
         )

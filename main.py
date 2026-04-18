@@ -75,6 +75,7 @@ from database import (
     list_qualifications_ordered,
     load_month_shift_employee_ids,
     replace_month_shift_assignments,
+    replace_employee_same_day_exclusions,
     set_shift_assignment,
     update_absence,
     update_employee,
@@ -89,7 +90,8 @@ COL_QUAL_BASE = 1
 COL_BLOCKED_BASE = COL_QUAL_BASE + N_QUAL
 COL_CLINIC = COL_BLOCKED_BASE + N_WEEKDAYS
 COL_MAX_SHIFTS = COL_CLINIC + 1
-COL_ACTIVE = COL_MAX_SHIFTS + 1
+COL_INCOMPATIBLE = COL_MAX_SHIFTS + 1
+COL_ACTIVE = COL_INCOMPATIBLE + 1
 N_COLS = COL_ACTIVE + 1
 
 
@@ -100,6 +102,91 @@ def _iso_from_qdate(d: QDate) -> str:
 def _qdate_from_iso(s: str) -> QDate:
     y, m, dd = (int(x) for x in s.split("-", 2))
     return QDate(y, m, dd)
+
+
+class MultiSelectComboBox(QComboBox):
+    selection_changed = pyqtSignal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        line = self.lineEdit()
+        if line is not None:
+            line.setReadOnly(True)
+            line.setPlaceholderText("Select employee(s)")
+        self.activated.connect(self._on_item_activated)
+
+    def add_check_item(self, text: str, data: int, checked: bool = False) -> None:
+        self.addItem(text, data)
+        idx = self.count() - 1
+        item = self.model().item(idx, 0)
+        if item is None:
+            return
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+        item.setData(
+            Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked,
+            Qt.ItemDataRole.CheckStateRole,
+        )
+        self._refresh_display_text()
+        self.setCurrentIndex(-1)
+
+    def checked_ids(self) -> set[int]:
+        out: set[int] = set()
+        for idx in range(self.count()):
+            item = self.model().item(idx, 0)
+            if item is None:
+                continue
+            if item.checkState() == Qt.CheckState.Checked:
+                raw = self.itemData(idx)
+                if raw is None:
+                    continue
+                out.add(int(raw))
+        return out
+
+    def set_checked(self, employee_id: int, checked: bool) -> None:
+        for idx in range(self.count()):
+            raw = self.itemData(idx)
+            if raw is None or int(raw) != employee_id:
+                continue
+            item = self.model().item(idx, 0)
+            if item is None:
+                return
+            next_state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            if item.checkState() == next_state:
+                return
+            item.setCheckState(next_state)
+            self._refresh_display_text()
+            self.selection_changed.emit()
+            return
+
+    def _on_item_activated(self, row: int) -> None:
+        if row < 0:
+            return
+        item = self.model().item(row, 0)
+        if item is None:
+            return
+        item.setCheckState(
+            Qt.CheckState.Unchecked
+            if item.checkState() == Qt.CheckState.Checked
+            else Qt.CheckState.Checked
+        )
+        self._refresh_display_text()
+        self.setCurrentIndex(-1)
+        self.selection_changed.emit()
+
+    def _refresh_display_text(self) -> None:
+        names: list[str] = []
+        for idx in range(self.count()):
+            item = self.model().item(idx, 0)
+            if item is None:
+                continue
+            if item.checkState() == Qt.CheckState.Checked:
+                names.append(self.itemText(idx))
+        text = ", ".join(names)
+        line = self.lineEdit()
+        if line is not None:
+            line.setText(text)
 
 
 class AbsencesPreferencesPage(QWidget):
@@ -727,7 +814,7 @@ class EmployeeListPage(QWidget):
             ["Name"]
             + list(CANONICAL_QUALIFICATIONS)
             + [f"{WEEKDAY_LABELS[d]} verfügbar" for d in WEEKDAY_CODES]
-            + ["Klinik", "Max. Schichtanzahl", "Active"]
+            + ["Klinik", "Max. Schichtanzahl", "No same-day with (#id,...)", "Active"]
         )
         self._table = QTableWidget()
         self._table.setColumnCount(N_COLS)
@@ -744,6 +831,7 @@ class EmployeeListPage(QWidget):
             hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(COL_CLINIC, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(COL_MAX_SHIFTS, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(COL_INCOMPATIBLE, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(COL_ACTIVE, QHeaderView.ResizeMode.ResizeToContents)
         for i, weekday in enumerate(WEEKDAY_CODES):
             item = self._table.horizontalHeaderItem(COL_BLOCKED_BASE + i)
@@ -751,10 +839,19 @@ class EmployeeListPage(QWidget):
                 item.setToolTip(
                     f"{WEEKDAY_LABELS[weekday]} availability: checked = available, unchecked = blocked."
                 )
+        incompatible_item = self._table.horizontalHeaderItem(COL_INCOMPATIBLE)
+        if incompatible_item is not None:
+            incompatible_item.setToolTip(
+                "Rare hard solver rule: listed employee IDs (#id) cannot be assigned on "
+                "the same day as this employee. Solver-only enforcement."
+            )
         layout.addWidget(self._table, stretch=1)
 
         self._clinics: list[sqlite3.Row] = []
         self._qual_rows: list[sqlite3.Row] = []
+        self._employee_name_by_id: dict[int, str] = {}
+        self._employee_row_by_id: dict[int, int] = {}
+        self._syncing_incompatible = False
 
         self.reload()
 
@@ -778,6 +875,32 @@ class EmployeeListPage(QWidget):
                 out.add(day)
         return out
 
+    @staticmethod
+    def _parse_same_day_exclusion_ids(raw: object) -> set[int]:
+        if raw is None or raw == "":
+            return set()
+        out: set[int] = set()
+        for token in str(raw).split(","):
+            token = token.strip()
+            if token.isdigit():
+                out.add(int(token))
+        return out
+
+    def _make_incompatible_combo(
+        self, employee_id: int | None, selected_ids: set[int]
+    ) -> MultiSelectComboBox:
+        combo = MultiSelectComboBox()
+        selected = set(selected_ids)
+        if employee_id is not None:
+            selected.discard(employee_id)
+        for other_id, other_name in sorted(
+            self._employee_name_by_id.items(), key=lambda item: item[1]
+        ):
+            if employee_id is not None and other_id == employee_id:
+                continue
+            combo.add_check_item(other_name, other_id, checked=(other_id in selected))
+        return combo
+
     def reload(self) -> None:
         conn = get_connection()
         try:
@@ -787,11 +910,14 @@ class EmployeeListPage(QWidget):
         finally:
             conn.close()
 
+        self._employee_name_by_id = {int(row["id"]): str(row["name"]) for row in rows}
+
         self._table.setRowCount(0)
         for emp in rows:
             self._append_row_from_db(emp)
         if self._table.rowCount() == 0:
             self._append_empty_row()
+        self._rebuild_employee_row_lookup()
 
     def _make_clinic_combo(self, current_id: int | None) -> QComboBox:
         cb = QComboBox()
@@ -857,6 +983,15 @@ class EmployeeListPage(QWidget):
         spin.setValue(int(emp["max_shifts_per_month"]))
         self._table.setCellWidget(r, COL_MAX_SHIFTS, spin)
 
+        exclusion_ids = self._parse_same_day_exclusion_ids(emp["same_day_excluded_employee_ids"])
+        incompatible_widget = self._make_incompatible_combo(eid, exclusion_ids)
+        incompatible_widget.selection_changed.connect(self._mirror_incompatible_from_sender)
+        self._table.setCellWidget(
+            r,
+            COL_INCOMPATIBLE,
+            incompatible_widget,
+        )
+
         act = QCheckBox()
         act.setChecked(bool(emp["active"]))
         self._table.setCellWidget(r, COL_ACTIVE, act)
@@ -881,12 +1016,21 @@ class EmployeeListPage(QWidget):
         spin.setValue(6)
         self._table.setCellWidget(r, COL_MAX_SHIFTS, spin)
 
+        incompatible_widget = self._make_incompatible_combo(None, set())
+        incompatible_widget.selection_changed.connect(self._mirror_incompatible_from_sender)
+        self._table.setCellWidget(
+            r,
+            COL_INCOMPATIBLE,
+            incompatible_widget,
+        )
+
         act = QCheckBox()
         act.setChecked(True)
         self._table.setCellWidget(r, COL_ACTIVE, act)
 
     def _add_row(self) -> None:
         self._append_empty_row()
+        self._rebuild_employee_row_lookup()
 
     def _row_employee_id(self, row: int) -> int | None:
         it = self._table.item(row, COL_NAME)
@@ -925,6 +1069,42 @@ class EmployeeListPage(QWidget):
                 blocked.append(weekday)
         return blocked
 
+    def _rebuild_employee_row_lookup(self) -> None:
+        self._employee_row_by_id.clear()
+        for row in range(self._table.rowCount()):
+            employee_id = self._row_employee_id(row)
+            if employee_id is not None:
+                self._employee_row_by_id[employee_id] = row
+
+    def _mirror_incompatible_from_sender(self) -> None:
+        sender = self.sender()
+        for row in range(self._table.rowCount()):
+            if self._table.cellWidget(row, COL_INCOMPATIBLE) is sender:
+                self._mirror_incompatible_selection(row)
+                return
+
+    def _mirror_incompatible_selection(self, row: int) -> None:
+        if self._syncing_incompatible:
+            return
+        source_id = self._row_employee_id(row)
+        if source_id is None:
+            return
+        source_widget = self._table.cellWidget(row, COL_INCOMPATIBLE)
+        if not isinstance(source_widget, MultiSelectComboBox):
+            return
+        selected_ids = source_widget.checked_ids()
+        self._syncing_incompatible = True
+        try:
+            for target_id, target_row in self._employee_row_by_id.items():
+                if target_id == source_id:
+                    continue
+                target_widget = self._table.cellWidget(target_row, COL_INCOMPATIBLE)
+                if not isinstance(target_widget, MultiSelectComboBox):
+                    continue
+                target_widget.set_checked(source_id, target_id in selected_ids)
+        finally:
+            self._syncing_incompatible = False
+
     def _save_all(self) -> None:
         if not self._clinics:
             QMessageBox.warning(
@@ -938,6 +1118,7 @@ class EmployeeListPage(QWidget):
         try:
             self._clinics = list_canonical_clinics(conn)
             self._qual_rows = list_qualifications_ordered(conn)
+            all_employee_ids: set[int] = set()
 
             for r in range(self._table.rowCount()):
                 name_item = self._table.item(r, COL_NAME)
@@ -981,6 +1162,7 @@ class EmployeeListPage(QWidget):
                         blocked_weekdays=blocked_weekdays,
                     )
                     name_item.setData(Qt.ItemDataRole.UserRole, new_id)
+                    all_employee_ids.add(new_id)
                 else:
                     update_employee(
                         conn,
@@ -992,6 +1174,27 @@ class EmployeeListPage(QWidget):
                         qualification_ids=qual_ids,
                         blocked_weekdays=blocked_weekdays,
                     )
+                    all_employee_ids.add(eid)
+
+            pairs: set[tuple[int, int]] = set()
+            for r in range(self._table.rowCount()):
+                employee_id = self._row_employee_id(r)
+                if employee_id is None:
+                    continue
+                w_incompat = self._table.cellWidget(r, COL_INCOMPATIBLE)
+                if not isinstance(w_incompat, MultiSelectComboBox):
+                    continue
+                target_ids = w_incompat.checked_ids()
+                for target_id in target_ids:
+                    if target_id == employee_id or target_id not in all_employee_ids:
+                        continue
+                    pair = (
+                        (employee_id, target_id)
+                        if employee_id < target_id
+                        else (target_id, employee_id)
+                    )
+                    pairs.add(pair)
+            replace_employee_same_day_exclusions(conn, pairs)
             conn.commit()
         except Exception as exc:  # noqa: BLE001
             conn.rollback()
@@ -1034,6 +1237,7 @@ class EmployeeListPage(QWidget):
         self._table.removeRow(row)
         if self._table.rowCount() == 0:
             self._append_empty_row()
+        self._rebuild_employee_row_lookup()
         if self._on_changed:
             self._on_changed()
 
