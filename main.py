@@ -19,9 +19,11 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateEdit,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -1172,6 +1174,8 @@ class SolverTabPage(QWidget):
         self._btn_apply.clicked.connect(self._apply_selected_solution)
         self._btn_export = QPushButton("Export CSV")
         self._btn_export.clicked.connect(self._export_selected_solution)
+        self._btn_details = QPushButton("Show details")
+        self._btn_details.clicked.connect(self._show_solution_details)
         self._solution_label = QLabel("No solution loaded.")
 
         controls.addWidget(self._btn_solve)
@@ -1179,9 +1183,35 @@ class SolverTabPage(QWidget):
         controls.addWidget(self._btn_next_solution)
         controls.addWidget(self._btn_apply)
         controls.addWidget(self._btn_export)
+        controls.addWidget(self._btn_details)
         controls.addStretch(1)
         controls.addWidget(self._solution_label)
         root.addLayout(controls)
+
+        stats_box = QGroupBox("Solution statistics")
+        stats_layout = QGridLayout(stats_box)
+        stats_layout.setContentsMargins(10, 8, 10, 8)
+        stats_layout.setHorizontalSpacing(16)
+        stats_layout.setVerticalSpacing(6)
+        self._stat_labels: dict[str, QLabel] = {}
+        stats_specs = [
+            ("Objective", "objective"),
+            ("Preference penalty", "preference_penalty"),
+            ("Preference reward", "preference_reward"),
+            ("Fairness spread", "fairness_spread"),
+            ("One-day gaps", "one_day_gap_count"),
+            ("Clinic duplicates (soft)", "clinic_duplicate_count"),
+        ]
+        for idx, (title, key) in enumerate(stats_specs):
+            row = idx // 2
+            col = (idx % 2) * 2
+            label = QLabel(f"{title}:")
+            value = QLabel("—")
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            stats_layout.addWidget(label, row, col)
+            stats_layout.addWidget(value, row, col + 1)
+            self._stat_labels[key] = value
+        root.addWidget(stats_box)
 
         self._preview = QTableWidget()
         self._preview.setAlternatingRowColors(True)
@@ -1204,6 +1234,7 @@ class SolverTabPage(QWidget):
 
         self._update_title()
         self._render_solution_preview()
+        self._clear_solution_stats()
         self._update_solution_controls()
 
     def set_month(self, year: int, month: int) -> None:
@@ -1216,6 +1247,7 @@ class SolverTabPage(QWidget):
             self._fixed_assignments = {}
             self._solution_label.setText("No solution loaded.")
             self._render_solution_preview()
+            self._clear_solution_stats()
             self._update_solution_controls()
 
     def _update_title(self) -> None:
@@ -1228,6 +1260,7 @@ class SolverTabPage(QWidget):
         self._btn_next_solution.setEnabled(can_switch)
         self._btn_apply.setEnabled(has and not self._running)
         self._btn_export.setEnabled(has and not self._running)
+        self._btn_details.setEnabled(has and not self._running)
         self._btn_solve.setEnabled(not self._running)
         self._spin_max_solutions.setEnabled(not self._running)
         self._spin_time_limit.setEnabled(not self._running)
@@ -1238,6 +1271,31 @@ class SolverTabPage(QWidget):
         self._chk_soft_clinic_rule.setEnabled(not self._running)
         self._spin_clinic_duplicate_penalty.setEnabled(
             (not self._running) and self._chk_soft_clinic_rule.isChecked()
+        )
+
+    def _clear_solution_stats(self) -> None:
+        for label in self._stat_labels.values():
+            label.setText("—")
+
+    def _update_solution_stats_panel(self) -> None:
+        if not self._solutions:
+            self._clear_solution_stats()
+            return
+        current = self._solutions[self._solution_index]
+        breakdown = current.objective_breakdown
+        self._stat_labels["objective"].setText(str(current.objective_value))
+        self._stat_labels["preference_penalty"].setText(
+            str(breakdown.get("preference_penalty", 0))
+        )
+        self._stat_labels["preference_reward"].setText(
+            str(breakdown.get("preference_reward", 0))
+        )
+        self._stat_labels["fairness_spread"].setText(str(breakdown.get("fairness_spread", 0)))
+        self._stat_labels["one_day_gap_count"].setText(
+            str(breakdown.get("one_day_gap_count", 0))
+        )
+        self._stat_labels["clinic_duplicate_count"].setText(
+            str(breakdown.get("clinic_duplicate_count", 0))
         )
 
     def _log(self, msg: str) -> None:
@@ -1293,6 +1351,7 @@ class SolverTabPage(QWidget):
         self._current_clinic_id = clinic_id
         self._solutions = []
         self._solution_index = 0
+        self._clear_solution_stats()
         self._log_window.clear()
         self._log(f"Starting solver for {self._year:04d}-{self._month:02d} ...")
         self._running = True
@@ -1345,6 +1404,7 @@ class SolverTabPage(QWidget):
             self._solution_index = 0
             self._solution_label.setText("No solution loaded.")
             self._render_solution_preview()
+            self._clear_solution_stats()
             self._update_solution_controls()
             return
 
@@ -1354,11 +1414,13 @@ class SolverTabPage(QWidget):
         if not self._solutions:
             self._solution_label.setText("No solution loaded.")
             self._render_solution_preview()
+            self._clear_solution_stats()
             self._update_solution_controls()
             QMessageBox.information(self, "Solver", result.message)
             return
 
         self._update_solution_label()
+        self._update_solution_stats_panel()
         self._render_solution_preview()
         self._update_solution_controls()
         QMessageBox.information(
@@ -1372,6 +1434,7 @@ class SolverTabPage(QWidget):
             return
         self._solution_index = (self._solution_index + step) % len(self._solutions)
         self._update_solution_label()
+        self._update_solution_stats_panel()
         self._render_solution_preview()
 
     def _update_solution_label(self) -> None:
@@ -1410,6 +1473,86 @@ class SolverTabPage(QWidget):
                 if employee_id is not None:
                     text = self._employee_names.get(int(employee_id), f"#{employee_id}")
                 self._preview.setItem(d - 1, col, QTableWidgetItem(text))
+
+    def _show_solution_details(self) -> None:
+        if not self._solutions:
+            QMessageBox.information(self, "Solver", "No solution loaded.")
+            return
+        current = self._solutions[self._solution_index]
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Solution details")
+        dialog.resize(900, 520)
+        layout = QVBoxLayout(dialog)
+
+        meta = QLabel(
+            f"Solution {self._solution_index + 1}/{len(self._solutions)} "
+            f"- objective {current.objective_value}"
+        )
+        layout.addWidget(meta)
+
+        table = QTableWidget()
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        headers = [
+            "Employee",
+            "Assigned shifts",
+            "prefer_work honored",
+            "prefer_work missed",
+            "prefer_off honored",
+            "prefer_off violated",
+            "Preference matches",
+            "Preference misses",
+        ]
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        th = table.horizontalHeader()
+        th.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for idx in range(1, len(headers)):
+            th.setSectionResizeMode(idx, QHeaderView.ResizeMode.ResizeToContents)
+
+        employee_ids = sorted(
+            self._employee_names.keys(), key=lambda eid: self._employee_names.get(eid, "")
+        )
+        table.setRowCount(len(employee_ids))
+        for row_idx, employee_id in enumerate(employee_ids):
+            pref_stats = current.employee_preference_stats.get(employee_id, {})
+            matches = int(pref_stats.get("preference_matches", 0))
+            misses = int(pref_stats.get("preference_misses", 0))
+            values = [
+                self._employee_names.get(employee_id, f"#{employee_id}"),
+                str(current.assigned_shift_counts.get(employee_id, 0)),
+                str(pref_stats.get("prefer_work_honored", 0)),
+                str(pref_stats.get("prefer_work_missed", 0)),
+                str(pref_stats.get("prefer_off_honored", 0)),
+                str(pref_stats.get("prefer_off_violated", 0)),
+                str(matches),
+                str(misses),
+            ]
+            for col_idx, value in enumerate(values):
+                table.setItem(row_idx, col_idx, QTableWidgetItem(value))
+
+        layout.addWidget(table, stretch=1)
+
+        summary = current.preference_summary
+        summary_label = QLabel(
+            "Preference totals: "
+            f"prefer_work honored {summary.get('prefer_work_honored', 0)}/"
+            f"{summary.get('prefer_work_total', 0)}, "
+            f"prefer_off honored {summary.get('prefer_off_honored', 0)}/"
+            f"{summary.get('prefer_off_total', 0)}."
+        )
+        summary_label.setWordWrap(True)
+        layout.addWidget(summary_label)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch(1)
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(dialog.accept)
+        close_row.addWidget(btn_close)
+        layout.addLayout(close_row)
+        dialog.exec()
 
     def _apply_selected_solution(self) -> None:
         if not self._solutions:

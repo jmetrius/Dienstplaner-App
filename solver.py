@@ -30,6 +30,10 @@ class SolverSolution:
     assignments: dict[tuple[str, str], int]
     objective_value: int
     shift_counts: dict[int, int]
+    assigned_shift_counts: dict[int, int]
+    objective_breakdown: dict[str, int]
+    preference_summary: dict[str, int]
+    employee_preference_stats: dict[int, dict[str, int]]
 
 
 @dataclass(frozen=True)
@@ -406,6 +410,7 @@ def solve_month_schedule(
             objective_terms.append(-cfg.prefer_work_reward * var)
 
     totals: list[cp_model.IntVar] = []
+    spread_var: cp_model.IntVar | None = None
     max_total_bound = max((employee_max.get(eid, 0) for eid in solver_employee_ids), default=0)
     for employee_id in solver_employee_ids:
         base_count = employee_month_base.get(employee_id, 0)
@@ -418,9 +423,9 @@ def solve_month_schedule(
         min_total = model.NewIntVar(0, max_total_bound, "min_total")
         model.AddMaxEquality(max_total, totals)
         model.AddMinEquality(min_total, totals)
-        spread = model.NewIntVar(0, max_total_bound, "spread")
-        model.Add(spread == max_total - min_total)
-        objective_terms.append(cfg.imbalance_weight * spread)
+        spread_var = model.NewIntVar(0, max_total_bound, "spread")
+        model.Add(spread_var == max_total - min_total)
+        objective_terms.append(cfg.imbalance_weight * spread_var)
     if one_day_gap_vars:
         objective_terms.append(cfg.one_day_gap_penalty * sum(one_day_gap_vars))
     if cfg.clinic_uniqueness_soft and clinic_soft_terms:
@@ -463,12 +468,107 @@ def solve_month_schedule(
                 total += solver.Value(var)
             shift_counts[employee_id] = total
 
+        assigned_shift_counts: dict[int, int] = {}
+        for employee_id in assignment_map.values():
+            assigned_shift_counts[employee_id] = assigned_shift_counts.get(employee_id, 0) + 1
+        assigned_employee_days: set[tuple[int, str]] = {
+            (int(employee_id), str(iso_date))
+            for (iso_date, _slot), employee_id in assignment_map.items()
+        }
+
+        prefer_work_total = 0
+        prefer_work_honored = 0
+        prefer_off_total = 0
+        prefer_off_violated = 0
+        employee_preference_stats: dict[int, dict[str, int]] = {}
+        for key, pref in preferences.items():
+            if not isinstance(key, tuple) or len(key) != 2:
+                continue
+            employee_id = int(key[0])
+            iso_date = str(key[1])
+            pref_code = str(pref)
+            stats = employee_preference_stats.setdefault(
+                employee_id,
+                {
+                    "prefer_work_total": 0,
+                    "prefer_work_honored": 0,
+                    "prefer_off_total": 0,
+                    "prefer_off_violated": 0,
+                },
+            )
+            assigned_to_employee = (employee_id, iso_date) in assigned_employee_days
+            if pref_code == "prefer_work":
+                prefer_work_total += 1
+                stats["prefer_work_total"] += 1
+                if assigned_to_employee:
+                    prefer_work_honored += 1
+                    stats["prefer_work_honored"] += 1
+            elif pref_code == "prefer_off":
+                prefer_off_total += 1
+                stats["prefer_off_total"] += 1
+                if assigned_to_employee:
+                    prefer_off_violated += 1
+                    stats["prefer_off_violated"] += 1
+
+        for stats in employee_preference_stats.values():
+            work_total = stats.get("prefer_work_total", 0)
+            work_honored = stats.get("prefer_work_honored", 0)
+            off_total = stats.get("prefer_off_total", 0)
+            off_violated = stats.get("prefer_off_violated", 0)
+            work_missed = work_total - work_honored
+            off_honored = off_total - off_violated
+            stats["prefer_work_missed"] = work_missed
+            stats["prefer_off_honored"] = off_honored
+            stats["preference_matches"] = work_honored + off_honored
+            stats["preference_misses"] = work_missed + off_violated
+
+        one_day_gap_count = sum(solver.Value(var) for var in one_day_gap_vars)
+        clinic_duplicate_count = (
+            sum(solver.Value(var) for var in clinic_soft_terms)
+            if cfg.clinic_uniqueness_soft
+            else 0
+        )
+        fairness_spread = solver.Value(spread_var) if spread_var is not None else 0
+        prefer_off_penalty_total = prefer_off_violated * cfg.prefer_off_penalty
+        prefer_work_reward_total = prefer_work_honored * cfg.prefer_work_reward
+        objective_breakdown = {
+            "preference_penalty": prefer_off_penalty_total,
+            "preference_reward": prefer_work_reward_total,
+            "fairness_spread": fairness_spread,
+            "fairness_cost": fairness_spread * cfg.imbalance_weight,
+            "one_day_gap_count": one_day_gap_count,
+            "one_day_gap_cost": one_day_gap_count * cfg.one_day_gap_penalty,
+            "clinic_duplicate_count": clinic_duplicate_count,
+            "clinic_duplicate_cost": clinic_duplicate_count
+            * cfg.clinic_duplicate_penalty,
+            "preference_net_cost": prefer_off_penalty_total - prefer_work_reward_total,
+            "computed_objective": (
+                prefer_off_penalty_total
+                - prefer_work_reward_total
+                + fairness_spread * cfg.imbalance_weight
+                + one_day_gap_count * cfg.one_day_gap_penalty
+                + clinic_duplicate_count * cfg.clinic_duplicate_penalty
+            ),
+        }
+        preference_summary = {
+            "prefer_work_total": prefer_work_total,
+            "prefer_work_honored": prefer_work_honored,
+            "prefer_work_missed": prefer_work_total - prefer_work_honored,
+            "prefer_off_total": prefer_off_total,
+            "prefer_off_honored": prefer_off_total - prefer_off_violated,
+            "prefer_off_violated": prefer_off_violated,
+        }
+
         objective_value = int(round(solver.ObjectiveValue()))
         solutions.append(
             SolverSolution(
                 assignments=assignment_map,
                 objective_value=objective_value,
                 shift_counts=shift_counts,
+                assigned_shift_counts=assigned_shift_counts,
+                objective_breakdown=objective_breakdown,
+                preference_summary=preference_summary,
+                employee_preference_stats=employee_preference_stats,
             )
         )
         log(
