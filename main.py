@@ -1593,47 +1593,26 @@ class SolverTabPage(QWidget):
         if not filename:
             return
         current = self._solutions[self._solution_index]
-        slot_order = {slot: idx for idx, slot in enumerate(SHIFT_SLOT_CODES)}
-        rows: list[tuple[str, str, str, str, str, str, str, str]] = []
-        for (iso, slot), employee_id in sorted(
-            current.assignments.items(), key=lambda item: (item[0][0], slot_order[item[0][1]])
-        ):
+        _, days_in_month = calendar.monthrange(self._year, self._month)
+        rows: list[list[str]] = []
+        for day in range(1, days_in_month + 1):
+            iso = date(self._year, self._month, day).isoformat()
             weekday = date.fromisoformat(iso).strftime("%A")
-            emp_id = int(employee_id)
-            emp_name = self._employee_names.get(emp_id, f"#{emp_id}")
-            emp_clinic_id = self._employee_clinic_ids.get(emp_id)
-            clinic_name = (
-                self._clinic_names.get(emp_clinic_id, f"#{emp_clinic_id}")
-                if emp_clinic_id is not None
-                else ""
-            )
-            source = "manual-fixed" if (iso, slot) in self._fixed_assignments else "solver"
-            rows.append(
-                (
-                    iso,
-                    weekday,
-                    slot,
-                    SHIFT_SLOT_LABELS[slot],
-                    str(emp_id),
-                    emp_name,
-                    clinic_name,
-                    source,
-                )
-            )
+            row: list[str] = [iso, weekday]
+            for slot in SHIFT_SLOT_CODES:
+                employee_id = current.assignments.get((iso, slot))
+                if employee_id is None:
+                    row.append("")
+                    continue
+                emp_id = int(employee_id)
+                row.append(self._employee_names.get(emp_id, f"#{emp_id}"))
+            rows.append(row)
         try:
             with open(filename, "w", newline="", encoding="utf-8") as fh:
                 writer = csv.writer(fh)
                 writer.writerow(
-                    [
-                        "date",
-                        "weekday",
-                        "slot_code",
-                        "slot_label",
-                        "employee_id",
-                        "employee_name",
-                        "employee_clinic",
-                        "source",
-                    ]
+                    ["date", "weekday"]
+                    + [SHIFT_SLOT_LABELS[slot] for slot in SHIFT_SLOT_CODES]
                 )
                 writer.writerows(rows)
         except Exception as exc:  # noqa: BLE001
