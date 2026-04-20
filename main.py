@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import calendar
 import csv
+import shutil
 import sqlite3
 import sys
 from collections.abc import Callable
 from datetime import date
+from pathlib import Path
 
 from PyQt6.QtCore import QDate, QObject, QThread, Qt, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -58,6 +60,7 @@ from database import (
     delete_absence,
     delete_employee,
     delete_shift_preference,
+    get_active_database_path,
     get_connection,
     get_employee_name,
     get_first_clinic_id,
@@ -69,13 +72,16 @@ from database import (
     list_canonical_clinics,
     load_solver_month_input,
     list_employee_options,
+    list_employee_same_day_exclusions,
     list_employees,
     list_employees_eligible_for_schedule_slot,
     list_clinics,
     list_preferences_overlapping_month,
     list_qualifications_ordered,
     load_month_shift_employee_ids,
+    purge_old_absences_and_preferences,
     replace_employee_same_day_exclusions,
+    set_active_database_path,
     set_shift_assignment,
     update_absence,
     update_employee,
@@ -2103,6 +2109,416 @@ class SolverTabPage(QWidget):
         QMessageBox.information(self, "Export", "CSV export created.")
 
 
+class DatabaseAdminPage(QWidget):
+    EMPLOYEE_CSV_HEADERS = [
+        "name",
+        "clinic_code",
+        "active",
+        "max_shifts_per_month",
+        "qualifications",
+        "blocked_weekdays",
+        "same_day_exclusions",
+    ]
+
+    def __init__(self, on_data_changed: Callable[[], None]) -> None:
+        super().__init__()
+        self._on_data_changed = on_data_changed
+        self._busy = False
+        self._selected_db_path = get_active_database_path()
+
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+        root.setContentsMargins(0, 8, 0, 0)
+
+        db_box = QGroupBox("Database file")
+        db_layout = QVBoxLayout(db_box)
+        db_row = QHBoxLayout()
+        self._db_path_edit = QLineEdit(str(self._selected_db_path))
+        self._db_path_edit.setReadOnly(True)
+        btn_browse = QPushButton("Browse...")
+        btn_browse.clicked.connect(self._choose_database_file)
+        self._btn_use_db = QPushButton("Use this database")
+        self._btn_use_db.clicked.connect(self._use_selected_database)
+        db_row.addWidget(self._db_path_edit, stretch=1)
+        db_row.addWidget(btn_browse)
+        db_row.addWidget(self._btn_use_db)
+        db_layout.addLayout(db_row)
+        root.addWidget(db_box)
+
+        employee_box = QGroupBox("Employee CSV")
+        employee_layout = QHBoxLayout(employee_box)
+        self._btn_export_employees = QPushButton("Export employees (CSV)")
+        self._btn_export_employees.clicked.connect(self._export_employees_csv)
+        self._btn_import_employees = QPushButton("Import employees (overwrite all)")
+        self._btn_import_employees.clicked.connect(self._import_employees_csv_overwrite)
+        employee_layout.addWidget(self._btn_export_employees)
+        employee_layout.addWidget(self._btn_import_employees)
+        employee_layout.addStretch(1)
+        root.addWidget(employee_box)
+
+        maintenance_box = QGroupBox("Database maintenance")
+        maintenance_layout = QHBoxLayout(maintenance_box)
+        self._btn_backup = QPushButton("Create backup")
+        self._btn_backup.clicked.connect(self._create_database_backup)
+        self._btn_vacuum = QPushButton("Run VACUUM")
+        self._btn_vacuum.clicked.connect(self._run_vacuum)
+        self._btn_cleanup_old = QPushButton("Delete data older than 12 months")
+        self._btn_cleanup_old.clicked.connect(self._cleanup_old_data)
+        maintenance_layout.addWidget(self._btn_backup)
+        maintenance_layout.addWidget(self._btn_vacuum)
+        maintenance_layout.addWidget(self._btn_cleanup_old)
+        maintenance_layout.addStretch(1)
+        root.addWidget(maintenance_box)
+
+        self._status = QPlainTextEdit()
+        self._status.setReadOnly(True)
+        self._status.setPlaceholderText("Operation log...")
+        root.addWidget(self._status, stretch=1)
+
+    def _append_status(self, message: str) -> None:
+        self._status.appendPlainText(message)
+
+    def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        self._btn_use_db.setEnabled(not busy)
+        self._btn_export_employees.setEnabled(not busy)
+        self._btn_import_employees.setEnabled(not busy)
+        self._btn_backup.setEnabled(not busy)
+        self._btn_vacuum.setEnabled(not busy)
+        self._btn_cleanup_old.setEnabled(not busy)
+
+    def _choose_database_file(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select database file",
+            str(self._selected_db_path.parent),
+            "SQLite database (*.db *.sqlite *.sqlite3);;All files (*)",
+        )
+        if not filename:
+            return
+        self._selected_db_path = Path(filename).expanduser().resolve()
+        self._db_path_edit.setText(str(self._selected_db_path))
+
+    def _use_selected_database(self) -> None:
+        target_path = self._selected_db_path
+        try:
+            initialized_path = init_database(target_path)
+            set_active_database_path(initialized_path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Database", f"Failed to open database:\n{exc}")
+            return
+        self._selected_db_path = initialized_path
+        self._db_path_edit.setText(str(initialized_path))
+        self._append_status(f"Using database: {initialized_path}")
+        self._on_data_changed()
+
+    @staticmethod
+    def _split_multi_value(raw: object) -> list[str]:
+        if raw is None:
+            return []
+        text = str(raw).strip()
+        if not text:
+            return []
+        normalized = text.replace("|", ";").replace(",", ";")
+        return [part.strip() for part in normalized.split(";") if part.strip()]
+
+    def _export_employees_csv(self) -> None:
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export employees CSV",
+            "employees_export.csv",
+            "CSV files (*.csv)",
+        )
+        if not filename:
+            return
+        conn = get_connection()
+        try:
+            clinics = list_clinics(conn)
+            clinic_code_by_id = {
+                int(row["id"]): str(row["code"]) for row in clinics if row["id"] is not None
+            }
+            qual_rows = list_qualifications_ordered(conn)
+            qual_name_by_id = {
+                int(row["id"]): str(row["name"]) for row in qual_rows if row["id"] is not None
+            }
+            employees = list_employees(conn)
+            exclusion_pairs = list_employee_same_day_exclusions(conn)
+        finally:
+            conn.close()
+
+        excluded_names_by_id: dict[int, set[str]] = {}
+        employee_name_by_id = {int(row["id"]): str(row["name"]) for row in employees}
+        for left, right in exclusion_pairs:
+            left_name = employee_name_by_id.get(left)
+            right_name = employee_name_by_id.get(right)
+            if left_name is None or right_name is None:
+                continue
+            excluded_names_by_id.setdefault(left, set()).add(right_name)
+            excluded_names_by_id.setdefault(right, set()).add(left_name)
+
+        rows: list[dict[str, str]] = []
+        for employee in employees:
+            employee_id = int(employee["id"])
+            qual_ids = EmployeeListPage._parse_qual_ids(employee["qual_ids"])
+            blocked_days = EmployeeListPage._parse_weekday_ids(employee["blocked_weekdays"])
+            rows.append(
+                {
+                    "name": str(employee["name"]).strip(),
+                    "clinic_code": clinic_code_by_id.get(int(employee["clinic_id"]), ""),
+                    "active": "1" if bool(employee["active"]) else "0",
+                    "max_shifts_per_month": str(int(employee["max_shifts_per_month"])),
+                    "qualifications": ";".join(
+                        sorted(
+                            qual_name_by_id[qid]
+                            for qid in qual_ids
+                            if qid in qual_name_by_id
+                        )
+                    ),
+                    "blocked_weekdays": ";".join(str(day) for day in sorted(blocked_days)),
+                    "same_day_exclusions": ";".join(
+                        sorted(excluded_names_by_id.get(employee_id, set()))
+                    ),
+                }
+            )
+        try:
+            with open(filename, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=self.EMPLOYEE_CSV_HEADERS)
+                writer.writeheader()
+                writer.writerows(rows)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        self._append_status(f"Exported {len(rows)} employees to {filename}")
+        QMessageBox.information(self, "Export", "Employee CSV export created.")
+
+    def _import_employees_csv_overwrite(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import employees CSV (overwrite)",
+            str(Path.cwd()),
+            "CSV files (*.csv)",
+        )
+        if not filename:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Overwrite employees",
+            (
+                "This will overwrite all existing employee data.\n"
+                "Existing employees, qualifications, blocked weekdays, and "
+                "same-day exclusions will be replaced.\n\nContinue?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        self._set_busy(True)
+        try:
+            imported_rows = self._read_employee_csv(filename)
+            self._apply_employee_import_overwrite(imported_rows)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Import failed", str(exc))
+            self._append_status(f"Import failed: {exc}")
+            return
+        finally:
+            self._set_busy(False)
+        self._append_status(
+            f"Imported {len(imported_rows)} employees from {filename} (full overwrite)."
+        )
+        QMessageBox.information(self, "Import", "Employee data overwritten from CSV.")
+        self._on_data_changed()
+
+    def _read_employee_csv(self, filename: str) -> list[dict[str, str]]:
+        with open(filename, newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            if reader.fieldnames is None:
+                raise ValueError("CSV has no header row.")
+            actual_headers = [h.strip() for h in reader.fieldnames]
+            if actual_headers != self.EMPLOYEE_CSV_HEADERS:
+                raise ValueError(
+                    "Unexpected CSV headers. Expected: "
+                    + ", ".join(self.EMPLOYEE_CSV_HEADERS)
+                )
+            rows: list[dict[str, str]] = []
+            for idx, row in enumerate(reader, start=2):
+                normalized = {k: str((v or "")).strip() for k, v in row.items()}
+                if not normalized.get("name"):
+                    raise ValueError(f"Row {idx}: name is required.")
+                if not normalized.get("clinic_code"):
+                    raise ValueError(f"Row {idx}: clinic_code is required.")
+                if normalized.get("active") not in {"0", "1", "true", "false", "True", "False"}:
+                    raise ValueError(f"Row {idx}: active must be 0/1/true/false.")
+                if not normalized.get("max_shifts_per_month", "").isdigit():
+                    raise ValueError(f"Row {idx}: max_shifts_per_month must be an integer >= 0.")
+                rows.append(normalized)
+        if not rows:
+            raise ValueError("CSV contains no employee rows.")
+        names = [row["name"] for row in rows]
+        if len(set(names)) != len(names):
+            raise ValueError(
+                "Employee names must be unique in import CSV because exclusions reference names."
+            )
+        return rows
+
+    def _apply_employee_import_overwrite(self, rows: list[dict[str, str]]) -> None:
+        conn = get_connection()
+        try:
+            clinics = list_clinics(conn)
+            clinic_id_by_code = {str(row["code"]): int(row["id"]) for row in clinics}
+            qual_rows = list_qualifications_ordered(conn)
+            qual_id_by_name = {str(row["name"]): int(row["id"]) for row in qual_rows}
+
+            conn.execute("BEGIN")
+            conn.execute("DELETE FROM employee_same_day_exclusions")
+            conn.execute("DELETE FROM employee_blocked_weekdays")
+            conn.execute("DELETE FROM employee_qualifications")
+            conn.execute("DELETE FROM employee_absences")
+            conn.execute("DELETE FROM employee_shift_preferences")
+            conn.execute("UPDATE shifts SET employee_id = NULL")
+            conn.execute("DELETE FROM employees")
+
+            employee_id_by_name: dict[str, int] = {}
+            exclusions_by_name: dict[str, list[str]] = {}
+            for idx, row in enumerate(rows, start=2):
+                name = row["name"]
+                clinic_code = row["clinic_code"]
+                clinic_id = clinic_id_by_code.get(clinic_code)
+                if clinic_id is None:
+                    raise ValueError(f"Row {idx}: unknown clinic_code '{clinic_code}'.")
+                qualification_names = self._split_multi_value(row["qualifications"])
+                qualification_ids: list[int] = []
+                for qual_name in qualification_names:
+                    qual_id = qual_id_by_name.get(qual_name)
+                    if qual_id is None:
+                        raise ValueError(f"Row {idx}: unknown qualification '{qual_name}'.")
+                    qualification_ids.append(qual_id)
+
+                blocked_weekdays: list[int] = []
+                for token in self._split_multi_value(row["blocked_weekdays"]):
+                    if not token.isdigit():
+                        raise ValueError(f"Row {idx}: blocked_weekdays token '{token}' is invalid.")
+                    day = int(token)
+                    if day not in WEEKDAY_CODES:
+                        raise ValueError(f"Row {idx}: blocked weekday '{day}' is out of range 0..6.")
+                    blocked_weekdays.append(day)
+
+                active_raw = row["active"].lower()
+                active = active_raw in {"1", "true"}
+                max_shifts = int(row["max_shifts_per_month"])
+                employee_id = insert_employee(
+                    conn,
+                    name=name,
+                    clinic_id=clinic_id,
+                    active=active,
+                    max_shifts_per_month=max_shifts,
+                    qualification_ids=qualification_ids,
+                    blocked_weekdays=blocked_weekdays,
+                )
+                employee_id_by_name[name] = employee_id
+                exclusions_by_name[name] = self._split_multi_value(row["same_day_exclusions"])
+
+            exclusion_pairs: set[tuple[int, int]] = set()
+            for name, excluded_names in exclusions_by_name.items():
+                left_id = employee_id_by_name[name]
+                for excluded_name in excluded_names:
+                    right_id = employee_id_by_name.get(excluded_name)
+                    if right_id is None:
+                        raise ValueError(
+                            f"Unknown same_day_exclusions name '{excluded_name}' for '{name}'."
+                        )
+                    if left_id == right_id:
+                        continue
+                    a, b = (left_id, right_id) if left_id < right_id else (right_id, left_id)
+                    exclusion_pairs.add((a, b))
+            replace_employee_same_day_exclusions(conn, exclusion_pairs)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _create_database_backup(self) -> None:
+        source = get_active_database_path()
+        target, _ = QFileDialog.getSaveFileName(
+            self,
+            "Create database backup",
+            f"{source.stem}_{date.today().isoformat()}_backup{source.suffix or '.db'}",
+            "SQLite database (*.db *.sqlite *.sqlite3);;All files (*)",
+        )
+        if not target:
+            return
+        try:
+            shutil.copy2(source, target)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Backup failed", str(exc))
+            return
+        self._append_status(f"Backup created: {target}")
+        QMessageBox.information(self, "Backup", "Database backup created.")
+
+    def _run_vacuum(self) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Run VACUUM",
+            "Run VACUUM now? This may take a while for large databases.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        conn = get_connection()
+        try:
+            conn.execute("VACUUM")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "VACUUM failed", str(exc))
+            return
+        finally:
+            conn.close()
+        self._append_status("VACUUM completed.")
+        QMessageBox.information(self, "Maintenance", "VACUUM completed.")
+
+    def _cleanup_old_data(self) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "Delete old data",
+            (
+                "Delete absences and preferences older than 12 months?\n"
+                "This action cannot be undone."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        conn = get_connection()
+        try:
+            deleted_absences, deleted_preferences, cutoff_date = (
+                purge_old_absences_and_preferences(conn, older_than_months=12)
+            )
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            conn.rollback()
+            QMessageBox.critical(self, "Cleanup failed", str(exc))
+            return
+        finally:
+            conn.close()
+        self._append_status(
+            f"Deleted {deleted_absences} absences and {deleted_preferences} preferences "
+            f"with end_date < {cutoff_date}."
+        )
+        QMessageBox.information(
+            self,
+            "Maintenance",
+            (
+                f"Cleanup complete.\nDeleted absences: {deleted_absences}\n"
+                f"Deleted preferences: {deleted_preferences}"
+            ),
+        )
+        self._on_data_changed()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -2140,6 +2556,8 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._employees_page, "Employees")
         self._tabs.addTab(self._absences_page, "Absences & preferences")
         self._tabs.addTab(self._solver_page, "Solver")
+        self._db_admin_page = DatabaseAdminPage(on_data_changed=self._refresh_after_employee_edit)
+        self._tabs.addTab(self._db_admin_page, "Database Admin")
 
         self._tabs.currentChanged.connect(self._on_tab_changed)
 

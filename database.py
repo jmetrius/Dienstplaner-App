@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterable
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "dienstplaner.db"
+ACTIVE_DB_PATH = DEFAULT_DB_PATH
 
 # Stable codes stored in shifts.shift_slot; labels are for the UI only.
 SHIFT_SLOT_CODES: tuple[str, ...] = (
@@ -337,11 +338,21 @@ def _migrate_employee_same_day_exclusions(conn: sqlite3.Connection) -> None:
 
 
 def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
-    path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
+    path = Path(db_path) if db_path is not None else ACTIVE_DB_PATH
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def get_active_database_path() -> Path:
+    return Path(ACTIVE_DB_PATH)
+
+
+def set_active_database_path(db_path: str | Path) -> Path:
+    global ACTIVE_DB_PATH
+    ACTIVE_DB_PATH = Path(db_path).expanduser().resolve()
+    return ACTIVE_DB_PATH
 
 
 def get_first_clinic_id(conn: sqlite3.Connection) -> int | None:
@@ -1021,7 +1032,7 @@ def init_database(db_path: str | Path | None = None) -> Path:
     Create the database file (if needed) and apply the schema.
     Returns the resolved path to the database file.
     """
-    path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
+    path = Path(db_path) if db_path is not None else ACTIVE_DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     try:
@@ -1039,3 +1050,27 @@ def init_database(db_path: str | Path | None = None) -> Path:
     finally:
         conn.close()
     return path.resolve()
+
+
+def purge_old_absences_and_preferences(
+    conn: sqlite3.Connection, *, older_than_months: int = 12
+) -> tuple[int, int, str]:
+    if older_than_months <= 0:
+        raise ValueError("older_than_months must be > 0")
+    today = date.today()
+    target_year = today.year
+    target_month = today.month - older_than_months
+    while target_month <= 0:
+        target_year -= 1
+        target_month += 12
+    day = min(today.day, calendar.monthrange(target_year, target_month)[1])
+    cutoff_date = date(target_year, target_month, day).isoformat()
+    deleted_absences = conn.execute(
+        "DELETE FROM employee_absences WHERE end_date < ?",
+        (cutoff_date,),
+    ).rowcount
+    deleted_preferences = conn.execute(
+        "DELETE FROM employee_shift_preferences WHERE end_date < ?",
+        (cutoff_date,),
+    ).rowcount
+    return int(deleted_absences), int(deleted_preferences), cutoff_date
