@@ -120,7 +120,7 @@ class MultiSelectComboBox(QComboBox):
         line = self.lineEdit()
         if line is not None:
             line.setReadOnly(True)
-            line.setPlaceholderText("Select employee(s)")
+            line.setPlaceholderText("No exclusions selected")
         self.activated.connect(self._on_item_activated)
 
     def add_check_item(self, text: str, data: int, checked: bool = False) -> None:
@@ -130,12 +130,8 @@ class MultiSelectComboBox(QComboBox):
         if item is None:
             return
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-        item.setData(
-            Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked,
-            Qt.ItemDataRole.CheckStateRole,
-        )
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
         self._refresh_display_text()
-        self.setCurrentIndex(-1)
 
     def checked_ids(self) -> set[int]:
         out: set[int] = set()
@@ -177,8 +173,8 @@ class MultiSelectComboBox(QComboBox):
             if item.checkState() == Qt.CheckState.Checked
             else Qt.CheckState.Checked
         )
-        self._refresh_display_text()
         self.setCurrentIndex(-1)
+        self._refresh_display_text()
         self.selection_changed.emit()
 
     def _refresh_display_text(self) -> None:
@@ -189,10 +185,14 @@ class MultiSelectComboBox(QComboBox):
                 continue
             if item.checkState() == Qt.CheckState.Checked:
                 names.append(self.itemText(idx))
-        text = ", ".join(names)
+        if not names:
+            text = "None selected"
+        else:
+            text = ", ".join(names)
         line = self.lineEdit()
         if line is not None:
             line.setText(text)
+            line.setToolTip(", ".join(names) if names else "No exclusions selected")
 
 
 class AbsencesPreferencesPage(QWidget):
