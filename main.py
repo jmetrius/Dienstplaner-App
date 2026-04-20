@@ -1282,11 +1282,13 @@ class SolverTabPage(QWidget):
         get_month: Callable[[], tuple[int, int]],
         get_manual_fixed_assignments: Callable[[int, int], dict[tuple[str, str], int]],
         on_apply: Callable[[], None],
+        on_month_changed: Callable[[int, int], None] | None = None,
     ) -> None:
         super().__init__()
         self._get_month = get_month
         self._get_manual_fixed_assignments = get_manual_fixed_assignments
         self._on_apply = on_apply
+        self._on_month_changed = on_month_changed
         self._year, self._month = self._get_month()
         self._running = False
         self._current_clinic_id: int | None = None
@@ -1309,7 +1311,32 @@ class SolverTabPage(QWidget):
         title_font.setBold(True)
         self._title.setFont(title_font)
         self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(self._title)
+
+        self._btn_prev_month = QPushButton("‹")
+        self._btn_prev_month.setFixedWidth(44)
+        self._btn_prev_month.setToolTip("Previous month")
+        self._btn_prev_month.clicked.connect(self._prev_month)
+        self._btn_next_month = QPushButton("›")
+        self._btn_next_month.setFixedWidth(44)
+        self._btn_next_month.setToolTip("Next month")
+        self._btn_next_month.clicked.connect(self._next_month)
+        nav_row = QHBoxLayout()
+        nav_row.setSpacing(8)
+        nav_row.addWidget(self._btn_prev_month)
+        nav_row.addStretch(1)
+        nav_row.addWidget(self._title)
+        nav_row.addStretch(1)
+        nav_row.addWidget(self._btn_next_month)
+        root.addLayout(nav_row)
+
+        self._btn_today_month = QPushButton("Today")
+        self._btn_today_month.setToolTip("Jump to current month")
+        self._btn_today_month.clicked.connect(self._go_today_month)
+        today_row = QHBoxLayout()
+        today_row.addStretch(1)
+        today_row.addWidget(self._btn_today_month)
+        today_row.addStretch(1)
+        root.addLayout(today_row)
 
         settings = QHBoxLayout()
         self._spin_max_solutions = QSpinBox()
@@ -1542,6 +1569,31 @@ class SolverTabPage(QWidget):
             self._clear_solution_stats()
             self._update_solution_controls()
 
+    def _prev_month(self) -> None:
+        if self._month == 1:
+            year, month = self._year - 1, 12
+        else:
+            year, month = self._year, self._month - 1
+        self.set_month(year, month)
+        if self._on_month_changed is not None:
+            self._on_month_changed(year, month)
+
+    def _next_month(self) -> None:
+        if self._month == 12:
+            year, month = self._year + 1, 1
+        else:
+            year, month = self._year, self._month + 1
+        self.set_month(year, month)
+        if self._on_month_changed is not None:
+            self._on_month_changed(year, month)
+
+    def _go_today_month(self) -> None:
+        today = date.today()
+        year, month = today.year, today.month
+        self.set_month(year, month)
+        if self._on_month_changed is not None:
+            self._on_month_changed(year, month)
+
     def _update_title(self) -> None:
         self._title.setText(date(self._year, self._month, 1).strftime("Solver - %B %Y"))
 
@@ -1553,6 +1605,9 @@ class SolverTabPage(QWidget):
         self._btn_export.setEnabled(has and not self._running)
         self._btn_details.setEnabled(has and not self._running)
         self._btn_solve.setEnabled(not self._running)
+        self._btn_prev_month.setEnabled(not self._running)
+        self._btn_next_month.setEnabled(not self._running)
+        self._btn_today_month.setEnabled(not self._running)
         self._spin_max_solutions.setEnabled(not self._running)
         self._spin_time_limit.setEnabled(not self._running)
         self._spin_prefer_off_penalty.setEnabled(not self._running)
@@ -1940,6 +1995,7 @@ class MainWindow(QMainWindow):
             get_month=lambda: (self._year, self._month),
             get_manual_fixed_assignments=self._collect_manual_fixed_assignments,
             on_apply=self._refresh_after_employee_edit,
+            on_month_changed=self._set_month_from_tabs,
         )
         self._tabs.addTab(self._employees_page, "Employees")
         self._tabs.addTab(self._absences_page, "Absences & preferences")
