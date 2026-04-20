@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -272,7 +273,7 @@ class AbsencesPreferencesPage(QWidget):
         hint = QLabel(
             "Absences: ranges that overlap the selected month are listed (ranges may extend "
             "outside the month). Preferences: date ranges are supported and are expanded "
-            "to single days for the solver."
+            "to single days for the solver. Quick add supports entries like 1,3,5-8."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #555;")
@@ -284,10 +285,13 @@ class AbsencesPreferencesPage(QWidget):
         abs_lay = QVBoxLayout(abs_box)
         abs_bar = QHBoxLayout()
         self._btn_abs_add = QPushButton("Add range")
+        self._btn_abs_quick_add = QPushButton("Quick add days/ranges")
         self._btn_abs_del = QPushButton("Delete selected range")
         self._btn_abs_add.clicked.connect(self._add_absence_row)
+        self._btn_abs_quick_add.clicked.connect(self._quick_add_absence_ranges)
         self._btn_abs_del.clicked.connect(self._delete_absence_selected)
         abs_bar.addWidget(self._btn_abs_add)
+        abs_bar.addWidget(self._btn_abs_quick_add)
         abs_bar.addWidget(self._btn_abs_del)
         abs_bar.addStretch(1)
         abs_lay.addLayout(abs_bar)
@@ -315,10 +319,13 @@ class AbsencesPreferencesPage(QWidget):
         pref_lay = QVBoxLayout(pref_box)
         pref_bar = QHBoxLayout()
         self._btn_pref_add = QPushButton("Add range")
+        self._btn_pref_quick_add = QPushButton("Quick add days/ranges")
         self._btn_pref_del = QPushButton("Delete selected range")
         self._btn_pref_add.clicked.connect(self._add_pref_row)
+        self._btn_pref_quick_add.clicked.connect(self._quick_add_preference_ranges)
         self._btn_pref_del.clicked.connect(self._delete_pref_selected)
         pref_bar.addWidget(self._btn_pref_add)
+        pref_bar.addWidget(self._btn_pref_quick_add)
         pref_bar.addWidget(self._btn_pref_del)
         pref_bar.addStretch(1)
         pref_lay.addLayout(pref_bar)
@@ -466,6 +473,166 @@ class AbsencesPreferencesPage(QWidget):
     def _default_pref_dates(self) -> tuple[QDate, QDate]:
         d = self._default_pref_date()
         return d, d
+
+    def _selected_parent(self, tree: QTreeWidget) -> QTreeWidgetItem | None:
+        item = tree.currentItem()
+        parent = item if item and item.parent() is None else item.parent() if item else None
+        if parent is not None:
+            return parent
+        return tree.topLevelItem(0)
+
+    def _day_ranges_prompt(self, employee_name: str, target_label: str) -> str | None:
+        last_day = calendar.monthrange(self._year, self._month)[1]
+        text, ok = QInputDialog.getText(
+            self,
+            f"Quick add {target_label}",
+            (
+                f"Enter day numbers or ranges for {employee_name} in {self._month_title()}.\n"
+                f"Examples: 1,3,5-8,15 (allowed days: 1-{last_day})"
+            ),
+        )
+        if not ok:
+            return None
+        value = text.strip()
+        if not value:
+            return None
+        return value
+
+    def _parse_day_ranges_input(
+        self, raw: str
+    ) -> tuple[list[tuple[QDate, QDate]], str | None]:
+        last_day = calendar.monthrange(self._year, self._month)[1]
+        tokens = [token.strip() for token in raw.replace(";", ",").split(",")]
+        days: set[int] = set()
+        for token in tokens:
+            if not token:
+                continue
+            if "-" in token:
+                left, right = (part.strip() for part in token.split("-", 1))
+                if not left.isdigit() or not right.isdigit():
+                    return [], f"Invalid range '{token}'. Use format like 5-8."
+                start = int(left)
+                end = int(right)
+                if start > end:
+                    return [], f"Invalid range '{token}': start must be <= end."
+                if start < 1 or end > last_day:
+                    return [], f"Range '{token}' is outside valid days 1-{last_day}."
+                for day in range(start, end + 1):
+                    days.add(day)
+            else:
+                if not token.isdigit():
+                    return [], f"Invalid day '{token}'. Use numbers like 1,3,15."
+                day = int(token)
+                if day < 1 or day > last_day:
+                    return [], f"Day '{token}' is outside valid days 1-{last_day}."
+                days.add(day)
+
+        if not days:
+            return [], "Please enter at least one valid day."
+
+        sorted_days = sorted(days)
+        ranges: list[tuple[QDate, QDate]] = []
+        start_day = sorted_days[0]
+        end_day = start_day
+        for day in sorted_days[1:]:
+            if day == end_day + 1:
+                end_day = day
+                continue
+            ranges.append(
+                (
+                    QDate(self._year, self._month, start_day),
+                    QDate(self._year, self._month, end_day),
+                )
+            )
+            start_day = day
+            end_day = day
+        ranges.append(
+            (
+                QDate(self._year, self._month, start_day),
+                QDate(self._year, self._month, end_day),
+            )
+        )
+        return ranges, None
+
+    def _quick_add_absence_ranges(self) -> None:
+        if not self._employees:
+            QMessageBox.information(
+                self,
+                "Employees",
+                "Add employees on the Employees tab first.",
+            )
+            return
+        parent = self._selected_parent(self._abs_tree)
+        if parent is None:
+            return
+        employee_name = parent.text(self.A_COL_EMP)
+        user_input = self._day_ranges_prompt(employee_name, "absence ranges")
+        if user_input is None:
+            return
+        ranges, err = self._parse_day_ranges_input(user_input)
+        if err is not None:
+            QMessageBox.warning(self, "Quick add", err)
+            return
+        for start_date, end_date in ranges:
+            child = QTreeWidgetItem(["  -", "", "", "", ""])
+            child.setData(self.A_COL_EMP, Qt.ItemDataRole.UserRole, None)
+            parent.addChild(child)
+            de_s = QDateEdit()
+            de_s.setCalendarPopup(True)
+            de_s.setDisplayFormat("yyyy-MM-dd")
+            de_s.setDate(start_date)
+            de_e = QDateEdit()
+            de_e.setCalendarPopup(True)
+            de_e.setDisplayFormat("yyyy-MM-dd")
+            de_e.setDate(end_date)
+            self._abs_tree.setItemWidget(child, self.A_COL_START, de_s)
+            self._abs_tree.setItemWidget(child, self.A_COL_END, de_e)
+            self._abs_tree.setItemWidget(
+                child, self.A_COL_CAT, self._make_category_combo("other")
+            )
+            self._abs_tree.setItemWidget(child, self.A_COL_NOTES, QLineEdit(""))
+        parent.setExpanded(True)
+        self._refresh_parent_summaries(self._abs_parent_by_employee_id, self._abs_tree)
+
+    def _quick_add_preference_ranges(self) -> None:
+        if not self._employees:
+            QMessageBox.information(
+                self,
+                "Employees",
+                "Add employees on the Employees tab first.",
+            )
+            return
+        parent = self._selected_parent(self._pref_tree)
+        if parent is None:
+            return
+        employee_name = parent.text(self.P_COL_EMP)
+        user_input = self._day_ranges_prompt(employee_name, "preference ranges")
+        if user_input is None:
+            return
+        ranges, err = self._parse_day_ranges_input(user_input)
+        if err is not None:
+            QMessageBox.warning(self, "Quick add", err)
+            return
+        for start_date, end_date in ranges:
+            child = QTreeWidgetItem(["  -", "", "", "", ""])
+            child.setData(self.P_COL_EMP, Qt.ItemDataRole.UserRole, None)
+            parent.addChild(child)
+            de_s = QDateEdit()
+            de_s.setCalendarPopup(True)
+            de_s.setDisplayFormat("yyyy-MM-dd")
+            de_s.setDate(start_date)
+            de_e = QDateEdit()
+            de_e.setCalendarPopup(True)
+            de_e.setDisplayFormat("yyyy-MM-dd")
+            de_e.setDate(end_date)
+            self._pref_tree.setItemWidget(child, self.P_COL_START, de_s)
+            self._pref_tree.setItemWidget(child, self.P_COL_END, de_e)
+            self._pref_tree.setItemWidget(
+                child, self.P_COL_PREF, self._make_preference_combo("prefer_off")
+            )
+            self._pref_tree.setItemWidget(child, self.P_COL_NOTES, QLineEdit(""))
+        parent.setExpanded(True)
+        self._refresh_parent_summaries(self._pref_parent_by_employee_id, self._pref_tree)
 
     def _append_absence_row(self, row: sqlite3.Row | None) -> None:
         if row is None:
