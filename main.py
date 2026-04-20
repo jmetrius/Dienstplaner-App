@@ -1325,9 +1325,9 @@ class SolverTabPage(QWidget):
         self._spin_prefer_work_reward = QSpinBox()
         self._spin_prefer_work_reward.setRange(0, 100)
         self._spin_prefer_work_reward.setValue(3)
-        self._spin_imbalance_weight = QSpinBox()
-        self._spin_imbalance_weight.setRange(0, 100)
-        self._spin_imbalance_weight.setValue(6)
+        self._spin_max_fairness_spread = QSpinBox()
+        self._spin_max_fairness_spread.setRange(0, 31)
+        self._spin_max_fairness_spread.setValue(1)
         self._spin_one_day_gap_penalty = QSpinBox()
         self._spin_one_day_gap_penalty.setRange(0, 200)
         self._spin_one_day_gap_penalty.setValue(5)
@@ -1349,8 +1349,8 @@ class SolverTabPage(QWidget):
         settings.addWidget(self._spin_prefer_off_penalty)
         settings.addWidget(QLabel("Prefer-work reward"))
         settings.addWidget(self._spin_prefer_work_reward)
-        settings.addWidget(QLabel("Fairness weight"))
-        settings.addWidget(self._spin_imbalance_weight)
+        settings.addWidget(QLabel("Max fairness spread"))
+        settings.addWidget(self._spin_max_fairness_spread)
         settings.addWidget(QLabel("One-day-gap penalty"))
         settings.addWidget(self._spin_one_day_gap_penalty)
         settings.addWidget(self._chk_soft_clinic_rule)
@@ -1470,7 +1470,7 @@ class SolverTabPage(QWidget):
         self._spin_time_limit.setEnabled(not self._running)
         self._spin_prefer_off_penalty.setEnabled(not self._running)
         self._spin_prefer_work_reward.setEnabled(not self._running)
-        self._spin_imbalance_weight.setEnabled(not self._running)
+        self._spin_max_fairness_spread.setEnabled(not self._running)
         self._spin_one_day_gap_penalty.setEnabled(not self._running)
         self._chk_soft_clinic_rule.setEnabled(not self._running)
         self._spin_clinic_duplicate_penalty.setEnabled(
@@ -1565,7 +1565,7 @@ class SolverTabPage(QWidget):
             time_limit_seconds=float(self._spin_time_limit.value()),
             prefer_off_penalty=int(self._spin_prefer_off_penalty.value()),
             prefer_work_reward=int(self._spin_prefer_work_reward.value()),
-            imbalance_weight=int(self._spin_imbalance_weight.value()),
+            max_fairness_spread=int(self._spin_max_fairness_spread.value()),
             one_day_gap_penalty=int(self._spin_one_day_gap_penalty.value()),
             clinic_uniqueness_soft=self._chk_soft_clinic_rule.isChecked(),
             clinic_duplicate_penalty=int(self._spin_clinic_duplicate_penalty.value()),
@@ -1576,7 +1576,7 @@ class SolverTabPage(QWidget):
             f"time_limit={solver_config.time_limit_seconds:.1f}s, "
             f"prefer_off_penalty={solver_config.prefer_off_penalty}, "
             f"prefer_work_reward={solver_config.prefer_work_reward}, "
-            f"imbalance_weight={solver_config.imbalance_weight}, "
+            f"max_fairness_spread={solver_config.max_fairness_spread}, "
             f"one_day_gap_penalty={solver_config.one_day_gap_penalty}, "
             f"clinic_rule_soft={solver_config.clinic_uniqueness_soft}, "
             f"clinic_duplicate_penalty={solver_config.clinic_duplicate_penalty}"

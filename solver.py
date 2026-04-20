@@ -4,7 +4,7 @@ CP-SAT automatic monthly schedule solver.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Callable
 
@@ -19,7 +19,7 @@ class SolverConfig:
     time_limit_seconds: float = 20.0
     prefer_off_penalty: int = 8
     prefer_work_reward: int = 3
-    imbalance_weight: int = 6
+    max_fairness_spread: int = 1
     one_day_gap_penalty: int = 5
     clinic_uniqueness_soft: bool = False
     clinic_duplicate_penalty: int = 20
@@ -61,6 +61,7 @@ def solve_month_schedule(
     solver_input: dict[str, object],
     config: SolverConfig | None = None,
     logger: Callable[[str], None] | None = None,
+    _skip_spread_diagnostic: bool = False,
 ) -> SolverResult:
     cfg = config or SolverConfig()
     logs: list[str] = []
@@ -457,7 +458,8 @@ def solve_month_schedule(
         model.AddMinEquality(min_total, totals)
         spread_var = model.NewIntVar(0, max_total_bound, "spread")
         model.Add(spread_var == max_total - min_total)
-        objective_terms.append(cfg.imbalance_weight * spread_var)
+        max_spread_limit = max(0, int(cfg.max_fairness_spread))
+        model.Add(spread_var <= max_spread_limit)
     if one_day_gap_vars:
         objective_terms.append(cfg.one_day_gap_penalty * sum(one_day_gap_vars))
     if cfg.clinic_uniqueness_soft and clinic_soft_terms:
@@ -567,7 +569,7 @@ def solve_month_schedule(
             "preference_penalty": prefer_off_penalty_total,
             "preference_reward": prefer_work_reward_total,
             "fairness_spread": fairness_spread,
-            "fairness_cost": fairness_spread * cfg.imbalance_weight,
+            "fairness_cost": 0,
             "one_day_gap_count": one_day_gap_count,
             "one_day_gap_cost": one_day_gap_count * cfg.one_day_gap_penalty,
             "clinic_duplicate_count": clinic_duplicate_count,
@@ -577,7 +579,6 @@ def solve_month_schedule(
             "computed_objective": (
                 prefer_off_penalty_total
                 - prefer_work_reward_total
-                + fairness_spread * cfg.imbalance_weight
                 + one_day_gap_count * cfg.one_day_gap_penalty
                 + clinic_duplicate_count * cfg.clinic_duplicate_penalty
             ),
@@ -620,6 +621,49 @@ def solve_month_schedule(
         model.Add(sum(selected_literals) <= len(selected_literals) - 1)
 
     if not solutions:
+        if (
+            not _skip_spread_diagnostic
+            and cfg.max_fairness_spread >= 0
+            and solver_employee_ids
+        ):
+            relaxed_spread_limit = max_total_bound
+            if cfg.max_fairness_spread < relaxed_spread_limit:
+                diagnostic_cfg = replace(
+                    cfg,
+                    max_fairness_spread=relaxed_spread_limit,
+                    max_solutions=1,
+                    time_limit_seconds=min(cfg.time_limit_seconds, 8.0),
+                )
+                diagnostic_result = solve_month_schedule(
+                    year=year,
+                    month=month,
+                    clinic_id=clinic_id,
+                    solver_input=solver_input,
+                    config=diagnostic_cfg,
+                    logger=None,
+                    _skip_spread_diagnostic=True,
+                )
+                if diagnostic_result.solutions:
+                    feasible_spread = int(
+                        diagnostic_result.solutions[0].objective_breakdown.get(
+                            "fairness_spread", relaxed_spread_limit
+                        )
+                    )
+                    log(
+                        "No solution under configured fairness spread limit; "
+                        f"relaxed diagnostic found feasible spread {feasible_spread}."
+                    )
+                    return SolverResult(
+                        solutions=[],
+                        status="infeasible",
+                        message=(
+                            "No feasible solution with max fairness spread "
+                            f"{cfg.max_fairness_spread}. "
+                            f"A relaxed diagnostic run found feasibility at spread "
+                            f"{feasible_spread}. Increase the max fairness spread."
+                        ),
+                        logs=logs,
+                    )
         return SolverResult(
             solutions=[],
             status="infeasible",
