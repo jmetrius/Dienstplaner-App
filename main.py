@@ -1345,22 +1345,84 @@ class SolverTabPage(QWidget):
             self._spin_clinic_duplicate_penalty.setEnabled
         )
 
-        settings.addWidget(QLabel("Max solutions"))
+        max_solutions_tip = (
+            "Maximum number of alternative solutions to generate. Higher values "
+            "give more options but increase solver runtime."
+        )
+        time_limit_tip = (
+            "Maximum solve time per solution attempt in seconds. If reached, the "
+            "best solution found so far is returned."
+        )
+        prefer_off_tip = (
+            "Penalty applied when someone is assigned on a day marked as "
+            "'prefer off'. Higher values enforce off-day wishes more strongly."
+        )
+        prefer_work_tip = (
+            "Reward for assigning someone on a day marked as 'prefer work'. "
+            "Higher values prioritize these wishes more."
+        )
+        fairness_spread_tip = (
+            "Hard limit for the difference between most- and least-assigned "
+            "employees in the month."
+        )
+        mix_balance_tip = (
+            "Weight for balancing Hausdienst vs ZNA shifts among employees who "
+            "are qualified for both groups."
+        )
+        one_day_gap_tip = (
+            "Penalty for patterns like work-rest-work with exactly one day gap "
+            "between two shifts."
+        )
+        clinic_soft_tip = (
+            "If enabled, same-clinic duplicates on a day become a soft penalty "
+            "instead of a hard infeasibility."
+        )
+        clinic_duplicate_tip = (
+            "Penalty per extra same-clinic assignment on a day when the "
+            "'Clinic/day rule soft' option is enabled."
+        )
+
+        lbl_max_solutions = QLabel("Max solutions")
+        lbl_max_solutions.setToolTip(max_solutions_tip)
+        self._spin_max_solutions.setToolTip(max_solutions_tip)
+        settings.addWidget(lbl_max_solutions)
         settings.addWidget(self._spin_max_solutions)
-        settings.addWidget(QLabel("Time limit"))
+        lbl_time_limit = QLabel("Time limit")
+        lbl_time_limit.setToolTip(time_limit_tip)
+        self._spin_time_limit.setToolTip(time_limit_tip)
+        settings.addWidget(lbl_time_limit)
         settings.addWidget(self._spin_time_limit)
-        settings.addWidget(QLabel("Prefer-off penalty"))
+        lbl_prefer_off = QLabel("Prefer-off penalty")
+        lbl_prefer_off.setToolTip(prefer_off_tip)
+        self._spin_prefer_off_penalty.setToolTip(prefer_off_tip)
+        settings.addWidget(lbl_prefer_off)
         settings.addWidget(self._spin_prefer_off_penalty)
-        settings.addWidget(QLabel("Prefer-work reward"))
+        lbl_prefer_work = QLabel("Prefer-work reward")
+        lbl_prefer_work.setToolTip(prefer_work_tip)
+        self._spin_prefer_work_reward.setToolTip(prefer_work_tip)
+        settings.addWidget(lbl_prefer_work)
         settings.addWidget(self._spin_prefer_work_reward)
-        settings.addWidget(QLabel("Max fairness spread"))
+        lbl_fairness_spread = QLabel("Max fairness spread")
+        lbl_fairness_spread.setToolTip(fairness_spread_tip)
+        self._spin_max_fairness_spread.setToolTip(fairness_spread_tip)
+        settings.addWidget(lbl_fairness_spread)
         settings.addWidget(self._spin_max_fairness_spread)
-        settings.addWidget(QLabel("Mix balance weight"))
+        lbl_mix_balance = QLabel("Mix balance weight")
+        lbl_mix_balance.setToolTip(mix_balance_tip)
+        self._spin_mix_balance_weight.setToolTip(mix_balance_tip)
+        settings.addWidget(lbl_mix_balance)
         settings.addWidget(self._spin_mix_balance_weight)
-        settings.addWidget(QLabel("One-day-gap penalty"))
+        lbl_one_day_gap = QLabel("One-day-gap penalty")
+        lbl_one_day_gap.setToolTip(one_day_gap_tip)
+        self._spin_one_day_gap_penalty.setToolTip(one_day_gap_tip)
+        settings.addWidget(lbl_one_day_gap)
         settings.addWidget(self._spin_one_day_gap_penalty)
+        self._chk_soft_clinic_rule.setToolTip(clinic_soft_tip)
         settings.addWidget(self._chk_soft_clinic_rule)
-        settings.addWidget(QLabel("Clinic duplicate penalty"))
+        lbl_clinic_duplicate = QLabel("Clinic duplicate penalty")
+        lbl_clinic_duplicate.setToolTip(clinic_duplicate_tip)
+        self._spin_clinic_duplicate_penalty.setToolTip(clinic_duplicate_tip)
+        settings.addWidget(lbl_clinic_duplicate)
         settings.addWidget(self._spin_clinic_duplicate_penalty)
         settings.addStretch(1)
         root.addLayout(settings)
@@ -1401,6 +1463,24 @@ class SolverTabPage(QWidget):
         stats_layout.setHorizontalSpacing(16)
         stats_layout.setVerticalSpacing(6)
         self._stat_labels: dict[str, QLabel] = {}
+        stat_tooltips = {
+            "objective": "Total optimization score of the current solution (lower is better).",
+            "preference_penalty": "Total penalty from violated 'prefer off' wishes.",
+            "preference_reward": "Total reward from honored 'prefer work' wishes.",
+            "fairness_spread": (
+                "Difference between the most- and least-assigned employees "
+                "in this solution."
+            ),
+            "mix_ratio_deviation": (
+                "Aggregate Hausdienst/ZNA mix imbalance for dual-qualified employees."
+            ),
+            "one_day_gap_count": (
+                "Number of work-rest-work patterns with exactly one day gap."
+            ),
+            "clinic_duplicate_count": (
+                "Number of clinic/day duplicate assignments (only relevant when clinic rule is soft)."
+            ),
+        }
         stats_specs = [
             ("Objective", "objective"),
             ("Preference penalty", "preference_penalty"),
@@ -1415,6 +1495,10 @@ class SolverTabPage(QWidget):
             col = (idx % 2) * 2
             label = QLabel(f"{title}:")
             value = QLabel("—")
+            tip = stat_tooltips.get(key, "")
+            if tip:
+                label.setToolTip(tip)
+                value.setToolTip(tip)
             value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             stats_layout.addWidget(label, row, col)
             stats_layout.addWidget(value, row, col + 1)
