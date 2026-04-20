@@ -121,7 +121,7 @@ def solve_month_schedule(
 
     # Employee normalization:
     # - ZNA employees are tracked but excluded from automatic assignment.
-    # - we precompute constraints-relevant metadata for quick lookups later.
+    # - We precompute constraints-relevant metadata for quick lookups later.
     active_employee_ids: list[int] = []
     solver_employee_ids: list[int] = []
     employee_max: dict[int, int] = {}

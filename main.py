@@ -1819,7 +1819,6 @@ class SolverTabPage(QWidget):
 
         # Preserve manual edits from the schedule grid as immutable decisions so the
         # solver only fills remaining open slots around them.
-        # Treat manual preplanning from the Schedule tab as fixed solver assignments.
         manual_fixed_assignments = self._get_manual_fixed_assignments(self._year, self._month)
         solver_input["fixed_assignments"] = {
             (str(k[0]), str(k[1])): int(v) for k, v in manual_fixed_assignments.items()
