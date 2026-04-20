@@ -62,15 +62,6 @@ CANONICAL_QUALIFICATIONS: tuple[str, ...] = (
     "Notaufnahme-Facharztstandard",
 )
 
-# Absence categories (DB code -> UI label).
-ABSENCE_CATEGORY_CODES: tuple[str, ...] = ("sick", "vacation", "holiday", "other")
-ABSENCE_CATEGORY_LABELS: dict[str, str] = {
-    "sick": "Krankheit",
-    "vacation": "Urlaub",
-    "holiday": "Feiertag",
-    "other": "Sonstiges",
-}
-
 # Shift preference: soft constraint for scheduling.
 PREFERENCE_CODES: tuple[str, ...] = ("prefer_work", "prefer_off")
 PREFERENCE_LABELS: dict[str, str] = {
@@ -580,7 +571,6 @@ def list_absences_overlapping_month(
             e.name AS employee_name,
             a.start_date,
             a.end_date,
-            a.category,
             a.notes
         FROM employee_absences a
         INNER JOIN employees e ON e.id = a.employee_id
@@ -617,16 +607,15 @@ def insert_absence(
     employee_id: int,
     start_date: str,
     end_date: str,
-    category: str,
     notes: str | None,
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO employee_absences
-            (employee_id, start_date, end_date, category, notes)
-        VALUES (?, ?, ?, ?, ?)
+            (employee_id, start_date, end_date, notes)
+        VALUES (?, ?, ?, ?)
         """,
-        (employee_id, start_date, end_date, category, notes or None),
+        (employee_id, start_date, end_date, notes or None),
     )
     return int(cur.lastrowid)
 
@@ -638,16 +627,15 @@ def update_absence(
     employee_id: int,
     start_date: str,
     end_date: str,
-    category: str,
     notes: str | None,
 ) -> None:
     conn.execute(
         """
         UPDATE employee_absences
-        SET employee_id = ?, start_date = ?, end_date = ?, category = ?, notes = ?
+        SET employee_id = ?, start_date = ?, end_date = ?, notes = ?
         WHERE id = ?
         """,
-        (employee_id, start_date, end_date, category, notes or None, absence_id),
+        (employee_id, start_date, end_date, notes or None, absence_id),
     )
 
 

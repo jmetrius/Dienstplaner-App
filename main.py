@@ -46,8 +46,6 @@ from PyQt6.QtWidgets import (
 )
 
 from database import (
-    ABSENCE_CATEGORY_CODES,
-    ABSENCE_CATEGORY_LABELS,
     CANONICAL_QUALIFICATIONS,
     PREFERENCE_CODES,
     PREFERENCE_LABELS,
@@ -200,8 +198,7 @@ class AbsencesPreferencesPage(QWidget):
     A_COL_EMP = 0
     A_COL_START = 1
     A_COL_END = 2
-    A_COL_CAT = 3
-    A_COL_NOTES = 4
+    A_COL_NOTES = 3
 
     P_COL_EMP = 0
     P_COL_START = 1
@@ -297,10 +294,8 @@ class AbsencesPreferencesPage(QWidget):
         abs_lay.addLayout(abs_bar)
 
         self._abs_tree = QTreeWidget()
-        self._abs_tree.setColumnCount(5)
-        self._abs_tree.setHeaderLabels(
-            ["Employee", "From", "To", "Category", "Notes"]
-        )
+        self._abs_tree.setColumnCount(4)
+        self._abs_tree.setHeaderLabels(["Employee", "From", "To", "Notes"])
         self._abs_tree.setAlternatingRowColors(True)
         self._abs_tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._abs_tree.setRootIsDecorated(True)
@@ -310,7 +305,6 @@ class AbsencesPreferencesPage(QWidget):
         ah.setSectionResizeMode(self.A_COL_EMP, QHeaderView.ResizeMode.Stretch)
         ah.setSectionResizeMode(self.A_COL_START, QHeaderView.ResizeMode.ResizeToContents)
         ah.setSectionResizeMode(self.A_COL_END, QHeaderView.ResizeMode.ResizeToContents)
-        ah.setSectionResizeMode(self.A_COL_CAT, QHeaderView.ResizeMode.ResizeToContents)
         ah.setSectionResizeMode(self.A_COL_NOTES, QHeaderView.ResizeMode.Stretch)
         abs_lay.addWidget(self._abs_tree)
         splitter.addWidget(abs_box)
@@ -435,19 +429,12 @@ class AbsencesPreferencesPage(QWidget):
     def _make_parent_item(
         self, tree: QTreeWidget, employee_id: int, employee_name: str
     ) -> QTreeWidgetItem:
-        parent = QTreeWidgetItem([employee_name, "", "", "", ""])
+        values = [employee_name] + [""] * max(tree.columnCount() - 1, 0)
+        parent = QTreeWidgetItem(values)
         parent.setData(self.A_COL_EMP, Qt.ItemDataRole.UserRole, employee_id)
         tree.addTopLevelItem(parent)
         parent.setExpanded(False)
         return parent
-
-    def _make_category_combo(self, current: str) -> QComboBox:
-        cb = QComboBox()
-        for code in ABSENCE_CATEGORY_CODES:
-            cb.addItem(ABSENCE_CATEGORY_LABELS[code], code)
-        if current in ABSENCE_CATEGORY_CODES:
-            cb.setCurrentIndex(ABSENCE_CATEGORY_CODES.index(current))
-        return cb
 
     def _make_preference_combo(self, current: str) -> QComboBox:
         cb = QComboBox()
@@ -587,9 +574,6 @@ class AbsencesPreferencesPage(QWidget):
             de_e.setDate(end_date)
             self._abs_tree.setItemWidget(child, self.A_COL_START, de_s)
             self._abs_tree.setItemWidget(child, self.A_COL_END, de_e)
-            self._abs_tree.setItemWidget(
-                child, self.A_COL_CAT, self._make_category_combo("other")
-            )
             self._abs_tree.setItemWidget(child, self.A_COL_NOTES, QLineEdit(""))
         parent.setExpanded(True)
         self._refresh_parent_summaries(self._abs_parent_by_employee_id, self._abs_tree)
@@ -641,7 +625,7 @@ class AbsencesPreferencesPage(QWidget):
         parent = self._abs_parent_by_employee_id.get(employee_id)
         if parent is None:
             return
-        child = QTreeWidgetItem(["", "", "", "", ""])
+        child = QTreeWidgetItem(["", "", "", ""])
         child.setData(self.A_COL_EMP, Qt.ItemDataRole.UserRole, int(row["id"]))
         parent.addChild(child)
         child.setText(self.A_COL_EMP, "  -")
@@ -656,9 +640,6 @@ class AbsencesPreferencesPage(QWidget):
         de_e.setDate(_qdate_from_iso(str(row["end_date"])))
         self._abs_tree.setItemWidget(child, self.A_COL_START, de_s)
         self._abs_tree.setItemWidget(child, self.A_COL_END, de_e)
-
-        cat = str(row["category"])
-        self._abs_tree.setItemWidget(child, self.A_COL_CAT, self._make_category_combo(cat))
 
         notes = str(row["notes"] or "")
         self._abs_tree.setItemWidget(child, self.A_COL_NOTES, QLineEdit(notes))
@@ -700,9 +681,8 @@ class AbsencesPreferencesPage(QWidget):
         for parent in parent_map.values():
             count = parent.childCount()
             parent.setText(1, f"{count} range(s)")
-            parent.setText(2, "")
-            parent.setText(3, "")
-            parent.setText(4, "")
+            for col in range(2, tree.columnCount()):
+                parent.setText(col, "")
         tree.sortItems(0, Qt.SortOrder.AscendingOrder)
 
     def _add_absence_row(self) -> None:
@@ -720,7 +700,7 @@ class AbsencesPreferencesPage(QWidget):
             if parent is None:
                 return
 
-        child = QTreeWidgetItem(["  -", "", "", "", ""])
+        child = QTreeWidgetItem(["  -", "", "", ""])
         child.setData(self.A_COL_EMP, Qt.ItemDataRole.UserRole, None)
         parent.addChild(child)
         parent.setExpanded(True)
@@ -735,7 +715,6 @@ class AbsencesPreferencesPage(QWidget):
         de_e.setDate(d_end)
         self._abs_tree.setItemWidget(child, self.A_COL_START, de_s)
         self._abs_tree.setItemWidget(child, self.A_COL_END, de_e)
-        self._abs_tree.setItemWidget(child, self.A_COL_CAT, self._make_category_combo("other"))
         self._abs_tree.setItemWidget(child, self.A_COL_NOTES, QLineEdit(""))
         self._abs_tree.setCurrentItem(child)
         self._refresh_parent_summaries(self._abs_parent_by_employee_id, self._abs_tree)
@@ -791,12 +770,10 @@ class AbsencesPreferencesPage(QWidget):
                 child = parent.child(i)
                 w_s = self._abs_tree.itemWidget(child, self.A_COL_START)
                 w_e = self._abs_tree.itemWidget(child, self.A_COL_END)
-                w_cat = self._abs_tree.itemWidget(child, self.A_COL_CAT)
                 w_notes = self._abs_tree.itemWidget(child, self.A_COL_NOTES)
                 if (
                     not isinstance(w_s, QDateEdit)
                     or not isinstance(w_e, QDateEdit)
-                    or not isinstance(w_cat, QComboBox)
                     or not isinstance(w_notes, QLineEdit)
                 ):
                     continue
@@ -807,8 +784,6 @@ class AbsencesPreferencesPage(QWidget):
                         "Absences: end date must be on or after the start date "
                         f"(employee {self._employee_name_by_id.get(employee_id, employee_id)})."
                     )
-                cat_raw = w_cat.currentData()
-                category = str(cat_raw) if cat_raw is not None else "other"
                 notes = w_notes.text().strip() or None
                 rid = self._item_record_id(child, self.A_COL_EMP)
                 if rid is None:
@@ -817,7 +792,6 @@ class AbsencesPreferencesPage(QWidget):
                         employee_id=employee_id,
                         start_date=start,
                         end_date=end,
-                        category=category,
                         notes=notes,
                     )
                 else:
@@ -827,7 +801,6 @@ class AbsencesPreferencesPage(QWidget):
                         employee_id=employee_id,
                         start_date=start,
                         end_date=end,
-                        category=category,
                         notes=notes,
                     )
                     seen_ids.add(rid)
