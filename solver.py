@@ -20,7 +20,7 @@ from database import (
 
 @dataclass(frozen=True)
 class SolverConfig:
-    max_solutions: int = 5
+    max_solutions: int = 3
     time_limit_seconds: float = 20.0
     prefer_off_penalty: int = 8
     prefer_work_reward: int = 3
