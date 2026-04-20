@@ -54,6 +54,10 @@ def _weekday(iso_date: str) -> int:
     return date.fromisoformat(iso_date).weekday()
 
 
+def _is_weekend_day(iso_date: str) -> bool:
+    return _weekday(iso_date) in (4, 5, 6)
+
+
 def _weekend_group_key(iso_date: str) -> tuple[int, int]:
     dt = date.fromisoformat(iso_date)
     return dt.isocalendar()[:2]
@@ -354,7 +358,7 @@ def solve_month_schedule(
 
     weekend_groups: dict[tuple[int, int], list[str]] = {}
     for iso_date in dates:
-        if _weekday(iso_date) in (5, 6):
+        if _is_weekend_day(iso_date):
             weekend_groups.setdefault(_weekend_group_key(iso_date), []).append(iso_date)
 
     for employee_id in constrained_employees:
@@ -414,8 +418,7 @@ def solve_month_schedule(
     }
     clinic_soft_terms: list[cp_model.IntVar] = []
     for iso_date in dates:
-        weekday = _weekday(iso_date)
-        if weekday in (4, 5):
+        if _is_weekend_day(iso_date):
             continue
         for clinic_value in clinic_ids:
             if clinic_value in zna_clinic_ids:
