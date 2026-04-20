@@ -76,7 +76,6 @@ from database import (
     list_preferences_overlapping_month,
     list_qualifications_ordered,
     load_month_shift_employee_ids,
-    replace_month_shift_assignments,
     replace_employee_same_day_exclusions,
     set_shift_assignment,
     update_absence,
@@ -1381,8 +1380,6 @@ class SolverTabPage(QWidget):
         self._btn_prev_solution.clicked.connect(lambda: self._move_solution(-1))
         self._btn_next_solution = QPushButton("Next solution")
         self._btn_next_solution.clicked.connect(lambda: self._move_solution(1))
-        self._btn_apply = QPushButton("Apply selected solution")
-        self._btn_apply.clicked.connect(self._apply_selected_solution)
         self._btn_export = QPushButton("Export CSV")
         self._btn_export.clicked.connect(self._export_selected_solution)
         self._btn_details = QPushButton("Show details")
@@ -1392,7 +1389,6 @@ class SolverTabPage(QWidget):
         controls.addWidget(self._btn_solve)
         controls.addWidget(self._btn_prev_solution)
         controls.addWidget(self._btn_next_solution)
-        controls.addWidget(self._btn_apply)
         controls.addWidget(self._btn_export)
         controls.addWidget(self._btn_details)
         controls.addStretch(1)
@@ -1470,7 +1466,6 @@ class SolverTabPage(QWidget):
         can_switch = has and len(self._solutions) > 1 and not self._running
         self._btn_prev_solution.setEnabled(can_switch)
         self._btn_next_solution.setEnabled(can_switch)
-        self._btn_apply.setEnabled(has and not self._running)
         self._btn_export.setEnabled(has and not self._running)
         self._btn_details.setEnabled(has and not self._running)
         self._btn_solve.setEnabled(not self._running)
@@ -1787,32 +1782,6 @@ class SolverTabPage(QWidget):
         close_row.addWidget(btn_close)
         layout.addLayout(close_row)
         dialog.exec()
-
-    def _apply_selected_solution(self) -> None:
-        if not self._solutions:
-            QMessageBox.information(self, "Solver", "No solution available to apply.")
-            return
-        if self._current_clinic_id is None:
-            QMessageBox.warning(self, "Solver", "No clinic available for writing.")
-            return
-        conn = get_connection()
-        try:
-            replace_month_shift_assignments(
-                conn,
-                clinic_id=self._current_clinic_id,
-                year=self._year,
-                month=self._month,
-                assignments=self._solutions[self._solution_index].assignments,
-            )
-            conn.commit()
-        except Exception as exc:  # noqa: BLE001
-            conn.rollback()
-            QMessageBox.critical(self, "Solver apply failed", str(exc))
-            return
-        finally:
-            conn.close()
-        self._on_apply()
-        QMessageBox.information(self, "Solver", "Selected solution applied successfully.")
 
     def _export_selected_solution(self) -> None:
         if not self._solutions:
