@@ -1,5 +1,10 @@
 """
 CP-SAT automatic monthly schedule solver.
+
+Design intent:
+- Keep all scheduling logic in one place so constraint interactions are explicit.
+- Separate *hard* feasibility constraints from *soft* objective preferences.
+- Return rich diagnostics (logs + objective breakdowns) to make tuning easier.
 """
 
 from __future__ import annotations
@@ -20,6 +25,8 @@ from database import (
 
 @dataclass(frozen=True)
 class SolverConfig:
+    """Tunable solver knobs used by `solve_month_schedule`."""
+
     max_solutions: int = 3
     time_limit_seconds: float = 20.0
     prefer_off_penalty: int = 8
@@ -33,6 +40,8 @@ class SolverConfig:
 
 @dataclass(frozen=True)
 class SolverSolution:
+    """One feasible solver output plus reporting metadata."""
+
     assignments: dict[tuple[str, str], int]
     objective_value: int
     shift_counts: dict[int, int]
@@ -44,6 +53,8 @@ class SolverSolution:
 
 @dataclass(frozen=True)
 class SolverResult:
+    """Top-level API return object for solver calls."""
+
     solutions: list[SolverSolution]
     status: str
     message: str
@@ -51,10 +62,14 @@ class SolverResult:
 
 
 def _weekday(iso_date: str) -> int:
+    """Return weekday as Monday=0 .. Sunday=6."""
+
     return date.fromisoformat(iso_date).weekday()
 
 
 def _weekend_group_key(iso_date: str) -> tuple[int, int]:
+    """Return `(iso_year, iso_week)` used to group weekend days."""
+
     dt = date.fromisoformat(iso_date)
     return dt.isocalendar()[:2]
 
@@ -69,6 +84,19 @@ def solve_month_schedule(
     logger: Callable[[str], None] | None = None,
     _skip_spread_diagnostic: bool = False,
 ) -> SolverResult:
+    """
+    Build and solve a monthly schedule model.
+
+    High-level phases:
+    1) Normalize `solver_input` and pre-validate fixed assignments.
+    2) Build decision variables for open slots.
+    3) Add hard constraints (coverage, rest, incompatibilities, maxima, etc.).
+    4) Add soft objective terms (preferences, mix balance, clinic duplication).
+    5) Solve up to `max_solutions` variants and extract detailed diagnostics.
+
+    `solver_input` is expected to come from `database.load_solver_month_input`.
+    """
+
     cfg = config or SolverConfig()
     logs: list[str] = []
 
@@ -77,6 +105,7 @@ def solve_month_schedule(
         if logger is not None:
             logger(message)
 
+    # Normalize incoming payload into local, strongly-typed containers.
     dates = list(solver_input.get("dates", []))
     employees_raw = list(solver_input.get("employees", []))
     fixed_assignments = dict(solver_input.get("fixed_assignments", {}))
@@ -90,6 +119,9 @@ def solve_month_schedule(
         solver_input.get("same_day_incompatible_pairs", [])
     )
 
+    # Employee normalization:
+    # - ZNA employees are tracked but excluded from automatic assignment.
+    # - we precompute constraints-relevant metadata for quick lookups later.
     active_employee_ids: list[int] = []
     solver_employee_ids: list[int] = []
     employee_max: dict[int, int] = {}
@@ -126,6 +158,7 @@ def solve_month_schedule(
         employee_blocked_weekdays[employee_id] = {
             day for day in blocked_days if day >= 0 and day <= 6
         }
+    # Dual-qualified employees are eligible for the mix-balance objective.
     dual_qualified_employee_ids = [
         employee_id
         for employee_id in solver_employee_ids
@@ -152,6 +185,7 @@ def solve_month_schedule(
             logs=logs,
         )
 
+    # Canonicalize incompatibility pairs so downstream constraints can iterate once.
     same_day_incompatible_pairs: set[tuple[int, int]] = set()
     for entry in same_day_incompatible_raw:
         if not isinstance(entry, tuple) or len(entry) != 2:
@@ -162,6 +196,7 @@ def solve_month_schedule(
         pair = (left, right) if left < right else (right, left)
         same_day_incompatible_pairs.add(pair)
 
+    # Core model data structures.
     model = cp_model.CpModel()
     variables: dict[tuple[str, str, int], cp_model.IntVar] = {}
     slot_candidates: dict[tuple[str, str], list[int]] = {}
@@ -174,6 +209,8 @@ def solve_month_schedule(
     employee_month_base: dict[int, int] = {employee_id: 0 for employee_id in solver_employee_ids}
     clinic_day_base: dict[tuple[int, str], int] = {}
 
+    # Base counters represent assignments that are already fixed externally.
+    # Decision variables are added *on top* of these bases.
     for iso_date, rows in external_assignments_by_date.items():
         if not isinstance(rows, list):
             continue
@@ -190,6 +227,7 @@ def solve_month_schedule(
             if employee_id in employee_month_base:
                 employee_month_base[employee_id] += 1
 
+    # Fixed assignments are also treated as base load and validated early.
     for (iso_date, slot), employee_id in fixed_assignments.items():
         eid = int(employee_id)
         if eid not in zna_employee_ids:
@@ -226,6 +264,7 @@ def solve_month_schedule(
                 logs=logs,
             )
 
+    # Create one boolean variable per feasible (date, slot, employee) triple.
     for iso_date in dates:
         for slot in SHIFT_SLOT_CODES:
             fixed_employee = fixed_assignments.get((iso_date, slot))
@@ -259,6 +298,8 @@ def solve_month_schedule(
                 [variables[(iso_date, slot, employee_id)] for employee_id in candidates]
             )
 
+    # Hard rule: every day must include at least one ZNA doctor with
+    # "Notaufnahme-Facharztstandard" across ZNA slots.
     facharzt_qual = "Notaufnahme-Facharztstandard"
     for iso_date in dates:
         fixed_has_facharzt = False
@@ -290,12 +331,15 @@ def solve_month_schedule(
             )
         model.Add(sum(facharzt_vars) >= 1)
 
+    # Constraint scope:
+    # include solver-managed employees plus anyone seen in base assignments.
     all_tracked_employees = set(solver_employee_ids)
     all_tracked_employees.update(employee_id for employee_id, _ in employee_day_base.keys())
     constrained_employees = {
         employee_id for employee_id in all_tracked_employees if employee_id not in zna_employee_ids
     }
 
+    # Hard rule: at most one shift per employee per day.
     for employee_id in constrained_employees:
         for iso_date in dates:
             base = employee_day_base.get((employee_id, iso_date), 0)
@@ -313,6 +357,7 @@ def solve_month_schedule(
             if day_vars:
                 model.Add(sum(day_vars) + base <= 1)
 
+    # Hard rule: no consecutive working days.
     for employee_id in constrained_employees:
         for idx in range(len(dates) - 1):
             d1 = dates[idx]
@@ -333,6 +378,7 @@ def solve_month_schedule(
             expr2 = sum(employee_day_vars.get((employee_id, d2), [])) + base2
             model.Add(expr1 + expr2 <= 1)
 
+    # Hard rule: configured incompatible employee pairs cannot work same day.
     for employee_a, employee_b in sorted(same_day_incompatible_pairs):
         for iso_date in dates:
             base_a = employee_day_base.get((employee_a, iso_date), 0)
@@ -352,6 +398,7 @@ def solve_month_schedule(
             expr_b = sum(employee_day_vars.get((employee_b, iso_date), [])) + base_b
             model.Add(expr_a + expr_b <= 1)
 
+    # Weekend load cap: no more than two worked weekends per employee.
     weekend_groups: dict[tuple[int, int], list[str]] = {}
     for iso_date in dates:
         if _weekday(iso_date) in (5, 6):
@@ -375,6 +422,7 @@ def solve_month_schedule(
         if worked_weekend_vars:
             model.Add(sum(worked_weekend_vars) <= 2)
 
+    # Soft rule helper: detect "work-rest-work" (single day gap) patterns.
     one_day_gap_vars: list[cp_model.IntVar] = []
     for employee_id in constrained_employees:
         for idx in range(len(dates) - 2):
@@ -392,6 +440,7 @@ def solve_month_schedule(
             model.Add(gap_var >= day1_expr + day3_expr - 1)
             one_day_gap_vars.append(gap_var)
 
+    # Hard rule: per-employee monthly max shifts.
     for employee_id in solver_employee_ids:
         max_shifts = employee_max.get(employee_id, 0)
         base_count = employee_month_base.get(employee_id, 0)
@@ -407,6 +456,7 @@ def solve_month_schedule(
             )
         model.Add(sum(employee_month_vars.get(employee_id, [])) + base_count <= max_shifts)
 
+    # Clinic uniqueness: usually hard, optionally softened via excess variables.
     clinic_ids = {
         int(clinic_value)
         for clinic_value in employee_clinic_by_id.values()
@@ -451,6 +501,7 @@ def solve_month_schedule(
                 if vars_for_clinic:
                     model.Add(sum(vars_for_clinic) + base <= 1)
 
+    # Objective assembly starts with explicit preference handling.
     objective_terms: list[cp_model.LinearExpr] = []
     for (iso_date, _slot, employee_id), var in variables.items():
         pref = preferences.get((employee_id, iso_date))
@@ -459,6 +510,7 @@ def solve_month_schedule(
         elif pref == "prefer_work":
             objective_terms.append(-cfg.prefer_work_reward * var)
 
+    # Fairness spread is modeled as max(total_shifts)-min(total_shifts).
     totals: list[cp_model.IntVar] = []
     spread_var: cp_model.IntVar | None = None
     max_total_bound = max((employee_max.get(eid, 0) for eid in solver_employee_ids), default=0)
@@ -482,6 +534,7 @@ def solve_month_schedule(
     if cfg.clinic_uniqueness_soft and clinic_soft_terms:
         objective_terms.append(cfg.clinic_duplicate_penalty * sum(clinic_soft_terms))
 
+    # Count fixed Haus/ZNA assignments so mix balancing reflects full month load.
     fixed_haus_count_by_employee: dict[int, int] = {
         employee_id: 0 for employee_id in solver_employee_ids
     }
@@ -497,6 +550,8 @@ def solve_month_schedule(
         elif slot in SHIFT_SLOTS_ZNA:
             fixed_zna_count_by_employee[employee_id] += 1
 
+    # Mix balancing penalizes dual-qualified employees who skew too much
+    # into one slot family (Hausdienst vs ZNA).
     mix_deviation_vars: list[cp_model.IntVar] = []
     global_haus_slots = len(dates) * len(SHIFT_SLOTS_HAUSDienst)
     global_zna_slots = len(dates) * len(SHIFT_SLOTS_ZNA)
@@ -552,6 +607,8 @@ def solve_month_schedule(
         f"{len(active_employee_ids) - len(solver_employee_ids)} ZNA manual-only employees excluded."
     )
 
+    # Solve repeatedly with different seeds and exclude previous solutions to
+    # generate alternatives.
     solutions: list[SolverSolution] = []
     for attempt in range(cfg.max_solutions):
         solver = cp_model.CpSolver()
@@ -564,6 +621,7 @@ def solve_month_schedule(
             log(f"Solver finished on attempt {attempt + 1} with status {status_name}.")
             break
 
+        # Reconstruct full assignment map: fixed rows + solver-selected rows.
         assignment_map: dict[tuple[str, str], int] = {}
         for key, employee_id in fixed_assignments.items():
             assignment_map[(str(key[0]), str(key[1]))] = int(employee_id)
@@ -573,6 +631,8 @@ def solve_month_schedule(
                     assignment_map[(iso_date, slot)] = employee_id
                     break
 
+        # `shift_counts` includes base load, `assigned_shift_counts` counts only
+        # assignments present in the final month map.
         shift_counts: dict[int, int] = {}
         for employee_id in solver_employee_ids:
             total = employee_month_base.get(employee_id, 0)
@@ -634,6 +694,7 @@ def solve_month_schedule(
             stats["preference_matches"] = work_honored + off_honored
             stats["preference_misses"] = work_missed + off_violated
 
+        # Build a human-readable objective decomposition for UI/debugging.
         one_day_gap_count = sum(solver.Value(var) for var in one_day_gap_vars)
         clinic_duplicate_count = (
             sum(solver.Value(var) for var in clinic_soft_terms)
@@ -696,6 +757,7 @@ def solve_month_schedule(
             f"({status_name})."
         )
 
+        # Add a no-good cut to prevent returning the exact same assignment again.
         selected_literals: list[cp_model.IntVar] = []
         for (iso_date, slot), candidates in slot_candidates.items():
             for employee_id in candidates:
@@ -707,6 +769,8 @@ def solve_month_schedule(
             break
         model.Add(sum(selected_literals) <= len(selected_literals) - 1)
 
+    # If no solution is found, run an optional diagnostic pass with a relaxed
+    # fairness spread to provide actionable feedback.
     if not solutions:
         if (
             not _skip_spread_diagnostic

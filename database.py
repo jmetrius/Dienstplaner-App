@@ -845,6 +845,11 @@ def load_solver_month_input(
 ) -> dict[str, object]:
     """
     Return normalized month input for the automatic solver.
+
+    This function is intentionally the single translation layer between
+    persistence (SQLite row shape) and solver model input shape. Keeping this
+    mapping centralized makes solver assumptions easier to audit and change.
+
     Keys:
       - dates: list[str]
       - employees: list[dict]
@@ -857,10 +862,12 @@ def load_solver_month_input(
     _, days_in_month = calendar.monthrange(year, month)
     dates = [f"{year:04d}-{month:02d}-{d:02d}" for d in range(1, days_in_month + 1)]
 
+    # Preload clinic code lookup because solver treats clinic code "zna" specially.
     clinic_code_by_id: dict[int, str] = {}
     for row in list_clinics(conn):
         clinic_code_by_id[int(row["id"])] = str(row["code"])
 
+    # Active employees are flattened into solver-friendly dict objects.
     employees: list[dict[str, object]] = []
     for row in list_active_employees_with_qualifications(conn):
         raw_names = str(row["qualification_names"] or "")
@@ -881,6 +888,8 @@ def load_solver_month_input(
         conn, clinic_id=clinic_id, year=year, month=month
     )
 
+    # Assignments in *other* clinics still count toward global constraints
+    # (e.g., one shift per day, no consecutive days).
     external_assignments_by_date: dict[str, list[tuple[int, int]]] = {}
     for row in load_month_shift_rows_all_clinics(conn, year=year, month=month):
         schedule_clinic_id = int(row["schedule_clinic_id"])
@@ -892,6 +901,7 @@ def load_solver_month_input(
 
     month_start = date(year, month, 1)
     month_end = date(year, month, days_in_month)
+    # Expand absence ranges into explicit day-level membership for O(1) checks.
     absences_by_employee: dict[int, set[str]] = {}
     for row in list_absences_overlapping_month(conn, year=year, month=month):
         employee_id = int(row["employee_id"])
@@ -905,6 +915,8 @@ def load_solver_month_input(
             absences_by_employee.setdefault(employee_id, set()).add(cur.isoformat())
             cur += timedelta(days=1)
 
+    # Preferences are expanded similarly; later rows overwrite earlier ones
+    # for the same employee/day key.
     preferences: dict[tuple[int, str], str] = {}
     for row in list_preferences_overlapping_month(conn, year=year, month=month):
         employee_id = int(row["employee_id"])
@@ -918,6 +930,7 @@ def load_solver_month_input(
             preferences[(employee_id, cur.isoformat())] = str(row["preference"])
             cur += timedelta(days=1)
 
+    # Helper maps used by UI rendering and clinic-based constraints.
     employee_clinic_by_id: dict[int, int] = {}
     employee_name_by_id: dict[int, str] = {}
     for row in conn.execute("SELECT id, clinic_id, name FROM employees"):
@@ -925,6 +938,7 @@ def load_solver_month_input(
         employee_clinic_by_id[employee_id] = int(row["clinic_id"])
         employee_name_by_id[employee_id] = str(row["name"])
 
+    # Per-employee weekday bans are attached directly to each employee payload.
     blocked_weekdays_by_employee: dict[int, set[int]] = {}
     for row in conn.execute("SELECT employee_id, weekday FROM employee_blocked_weekdays"):
         employee_id = int(row["employee_id"])

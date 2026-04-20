@@ -1410,6 +1410,7 @@ class SolverWorker(QObject):
         self._config = config
 
     def run(self) -> None:
+        # Runs inside a worker thread to keep the UI responsive during CP-SAT search.
         result = solve_month_schedule(
             year=self._year,
             month=self._month,
@@ -1816,6 +1817,8 @@ class SolverTabPage(QWidget):
         finally:
             conn.close()
 
+        # Preserve manual edits from the schedule grid as immutable decisions so the
+        # solver only fills remaining open slots around them.
         # Treat manual preplanning from the Schedule tab as fixed solver assignments.
         manual_fixed_assignments = self._get_manual_fixed_assignments(self._year, self._month)
         solver_input["fixed_assignments"] = {
@@ -1863,6 +1866,7 @@ class SolverTabPage(QWidget):
             clinic_uniqueness_soft=self._chk_soft_clinic_rule.isChecked(),
             clinic_duplicate_penalty=int(self._spin_clinic_duplicate_penalty.value()),
         )
+        # Mirror GUI settings into a plain dataclass to keep the worker interface stable.
         self._log(
             "Settings: "
             f"max_solutions={solver_config.max_solutions}, "
