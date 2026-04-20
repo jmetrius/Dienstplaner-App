@@ -10,7 +10,12 @@ from typing import Callable
 
 from ortools.sat.python import cp_model
 
-from database import SHIFT_SLOT_CODES, SHIFT_SLOTS_ZNA, qualification_names_for_shift_slot
+from database import (
+    SHIFT_SLOT_CODES,
+    SHIFT_SLOTS_HAUSDienst,
+    SHIFT_SLOTS_ZNA,
+    qualification_names_for_shift_slot,
+)
 
 
 @dataclass(frozen=True)
@@ -20,6 +25,7 @@ class SolverConfig:
     prefer_off_penalty: int = 8
     prefer_work_reward: int = 3
     max_fairness_spread: int = 1
+    mix_balance_weight: int = 4
     one_day_gap_penalty: int = 5
     clinic_uniqueness_soft: bool = False
     clinic_duplicate_penalty: int = 20
@@ -91,6 +97,7 @@ def solve_month_schedule(
     employee_blocked_weekdays: dict[int, set[int]] = {}
     zna_employee_ids: set[int] = set()
     zna_clinic_ids: set[int] = set()
+    dual_qualified_employee_ids: list[int] = []
     for item in employees_raw:
         if not isinstance(item, dict):
             continue
@@ -119,6 +126,16 @@ def solve_month_schedule(
         employee_blocked_weekdays[employee_id] = {
             day for day in blocked_days if day >= 0 and day <= 6
         }
+    dual_qualified_employee_ids = [
+        employee_id
+        for employee_id in solver_employee_ids
+        if "Hausdienst" in employee_quals.get(employee_id, set())
+        and (
+            "Notaufnahme" in employee_quals.get(employee_id, set())
+            or "Notaufnahme-Facharztstandard"
+            in employee_quals.get(employee_id, set())
+        )
+    ]
 
     if not dates:
         return SolverResult(
@@ -465,6 +482,67 @@ def solve_month_schedule(
     if cfg.clinic_uniqueness_soft and clinic_soft_terms:
         objective_terms.append(cfg.clinic_duplicate_penalty * sum(clinic_soft_terms))
 
+    fixed_haus_count_by_employee: dict[int, int] = {
+        employee_id: 0 for employee_id in solver_employee_ids
+    }
+    fixed_zna_count_by_employee: dict[int, int] = {
+        employee_id: 0 for employee_id in solver_employee_ids
+    }
+    for (iso_date, slot), employee_id_raw in fixed_assignments.items():
+        employee_id = int(employee_id_raw)
+        if employee_id not in fixed_haus_count_by_employee:
+            continue
+        if slot in SHIFT_SLOTS_HAUSDienst:
+            fixed_haus_count_by_employee[employee_id] += 1
+        elif slot in SHIFT_SLOTS_ZNA:
+            fixed_zna_count_by_employee[employee_id] += 1
+
+    mix_deviation_vars: list[cp_model.IntVar] = []
+    global_haus_slots = len(dates) * len(SHIFT_SLOTS_HAUSDienst)
+    global_zna_slots = len(dates) * len(SHIFT_SLOTS_ZNA)
+    mix_balance_weight = max(0, int(cfg.mix_balance_weight))
+    if (
+        mix_balance_weight > 0
+        and dual_qualified_employee_ids
+        and global_haus_slots > 0
+        and global_zna_slots > 0
+    ):
+        max_mix_abs = max(1, max_total_bound)
+        for employee_id in dual_qualified_employee_ids:
+            haus_expr = (
+                sum(
+                    variables[(iso_date, slot, employee_id)]
+                    for (iso_date, slot), candidates in slot_candidates.items()
+                    if slot in SHIFT_SLOTS_HAUSDienst and employee_id in candidates
+                )
+                + fixed_haus_count_by_employee.get(employee_id, 0)
+            )
+            zna_expr = (
+                sum(
+                    variables[(iso_date, slot, employee_id)]
+                    for (iso_date, slot), candidates in slot_candidates.items()
+                    if slot in SHIFT_SLOTS_ZNA and employee_id in candidates
+                )
+                + fixed_zna_count_by_employee.get(employee_id, 0)
+            )
+            deviation = model.NewIntVar(
+                0,
+                max_mix_abs,
+                f"mix_ratio_deviation_{employee_id}",
+            )
+            diff_expr = haus_expr - zna_expr
+            model.Add(deviation >= diff_expr)
+            model.Add(deviation >= -diff_expr)
+            mix_deviation_vars.append(deviation)
+        if mix_deviation_vars:
+            objective_terms.append(mix_balance_weight * sum(mix_deviation_vars))
+            log(
+                "Mix balance objective enabled for "
+                f"{len(mix_deviation_vars)} dual-qualified employees "
+                "(proxy: minimize |haus_count-zna_count| per employee, "
+                f"weight={mix_balance_weight})."
+            )
+
     if objective_terms:
         model.Minimize(sum(objective_terms))
 
@@ -565,11 +643,19 @@ def solve_month_schedule(
         fairness_spread = solver.Value(spread_var) if spread_var is not None else 0
         prefer_off_penalty_total = prefer_off_violated * cfg.prefer_off_penalty
         prefer_work_reward_total = prefer_work_honored * cfg.prefer_work_reward
+        mix_ratio_deviation = (
+            sum(solver.Value(var) for var in mix_deviation_vars) if mix_deviation_vars else 0
+        )
+        mix_ratio_cost = mix_ratio_deviation * mix_balance_weight
         objective_breakdown = {
             "preference_penalty": prefer_off_penalty_total,
             "preference_reward": prefer_work_reward_total,
             "fairness_spread": fairness_spread,
             "fairness_cost": 0,
+            "mix_ratio_target_haus_slots": global_haus_slots,
+            "mix_ratio_target_zna_slots": global_zna_slots,
+            "mix_ratio_deviation": mix_ratio_deviation,
+            "mix_ratio_cost": mix_ratio_cost,
             "one_day_gap_count": one_day_gap_count,
             "one_day_gap_cost": one_day_gap_count * cfg.one_day_gap_penalty,
             "clinic_duplicate_count": clinic_duplicate_count,
@@ -579,6 +665,7 @@ def solve_month_schedule(
             "computed_objective": (
                 prefer_off_penalty_total
                 - prefer_work_reward_total
+                + mix_ratio_cost
                 + one_day_gap_count * cfg.one_day_gap_penalty
                 + clinic_duplicate_count * cfg.clinic_duplicate_penalty
             ),

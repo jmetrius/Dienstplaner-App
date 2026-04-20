@@ -52,6 +52,8 @@ from database import (
     PREFERENCE_LABELS,
     SHIFT_SLOT_CODES,
     SHIFT_SLOT_LABELS,
+    SHIFT_SLOTS_HAUSDienst,
+    SHIFT_SLOTS_ZNA,
     WEEKDAY_CODES,
     WEEKDAY_LABELS,
     delete_absence,
@@ -1328,6 +1330,9 @@ class SolverTabPage(QWidget):
         self._spin_max_fairness_spread = QSpinBox()
         self._spin_max_fairness_spread.setRange(0, 31)
         self._spin_max_fairness_spread.setValue(1)
+        self._spin_mix_balance_weight = QSpinBox()
+        self._spin_mix_balance_weight.setRange(0, 100)
+        self._spin_mix_balance_weight.setValue(4)
         self._spin_one_day_gap_penalty = QSpinBox()
         self._spin_one_day_gap_penalty.setRange(0, 200)
         self._spin_one_day_gap_penalty.setValue(5)
@@ -1351,6 +1356,8 @@ class SolverTabPage(QWidget):
         settings.addWidget(self._spin_prefer_work_reward)
         settings.addWidget(QLabel("Max fairness spread"))
         settings.addWidget(self._spin_max_fairness_spread)
+        settings.addWidget(QLabel("Mix balance weight"))
+        settings.addWidget(self._spin_mix_balance_weight)
         settings.addWidget(QLabel("One-day-gap penalty"))
         settings.addWidget(self._spin_one_day_gap_penalty)
         settings.addWidget(self._chk_soft_clinic_rule)
@@ -1403,6 +1410,7 @@ class SolverTabPage(QWidget):
             ("Preference penalty", "preference_penalty"),
             ("Preference reward", "preference_reward"),
             ("Fairness spread", "fairness_spread"),
+            ("Mix ratio deviation", "mix_ratio_deviation"),
             ("One-day gaps", "one_day_gap_count"),
             ("Clinic duplicates (soft)", "clinic_duplicate_count"),
         ]
@@ -1471,6 +1479,7 @@ class SolverTabPage(QWidget):
         self._spin_prefer_off_penalty.setEnabled(not self._running)
         self._spin_prefer_work_reward.setEnabled(not self._running)
         self._spin_max_fairness_spread.setEnabled(not self._running)
+        self._spin_mix_balance_weight.setEnabled(not self._running)
         self._spin_one_day_gap_penalty.setEnabled(not self._running)
         self._chk_soft_clinic_rule.setEnabled(not self._running)
         self._spin_clinic_duplicate_penalty.setEnabled(
@@ -1495,6 +1504,9 @@ class SolverTabPage(QWidget):
             str(breakdown.get("preference_reward", 0))
         )
         self._stat_labels["fairness_spread"].setText(str(breakdown.get("fairness_spread", 0)))
+        self._stat_labels["mix_ratio_deviation"].setText(
+            str(breakdown.get("mix_ratio_deviation", 0))
+        )
         self._stat_labels["one_day_gap_count"].setText(
             str(breakdown.get("one_day_gap_count", 0))
         )
@@ -1566,6 +1578,7 @@ class SolverTabPage(QWidget):
             prefer_off_penalty=int(self._spin_prefer_off_penalty.value()),
             prefer_work_reward=int(self._spin_prefer_work_reward.value()),
             max_fairness_spread=int(self._spin_max_fairness_spread.value()),
+            mix_balance_weight=int(self._spin_mix_balance_weight.value()),
             one_day_gap_penalty=int(self._spin_one_day_gap_penalty.value()),
             clinic_uniqueness_soft=self._chk_soft_clinic_rule.isChecked(),
             clinic_duplicate_penalty=int(self._spin_clinic_duplicate_penalty.value()),
@@ -1577,6 +1590,7 @@ class SolverTabPage(QWidget):
             f"prefer_off_penalty={solver_config.prefer_off_penalty}, "
             f"prefer_work_reward={solver_config.prefer_work_reward}, "
             f"max_fairness_spread={solver_config.max_fairness_spread}, "
+            f"mix_balance_weight={solver_config.mix_balance_weight}, "
             f"one_day_gap_penalty={solver_config.one_day_gap_penalty}, "
             f"clinic_rule_soft={solver_config.clinic_uniqueness_soft}, "
             f"clinic_duplicate_penalty={solver_config.clinic_duplicate_penalty}"
@@ -1702,6 +1716,8 @@ class SolverTabPage(QWidget):
         headers = [
             "Employee",
             "Assigned shifts",
+            "Assigned Hausdienst",
+            "Assigned ZNA",
             "prefer_work honored",
             "prefer_work missed",
             "prefer_off honored",
@@ -1719,6 +1735,18 @@ class SolverTabPage(QWidget):
         employee_ids = sorted(
             self._employee_names.keys(), key=lambda eid: self._employee_names.get(eid, "")
         )
+        assigned_hausdienst_counts: dict[int, int] = {}
+        assigned_zna_counts: dict[int, int] = {}
+        for (_iso_date, slot), assigned_employee in current.assignments.items():
+            employee_id = int(assigned_employee)
+            if slot in SHIFT_SLOTS_HAUSDienst:
+                assigned_hausdienst_counts[employee_id] = (
+                    assigned_hausdienst_counts.get(employee_id, 0) + 1
+                )
+            elif slot in SHIFT_SLOTS_ZNA:
+                assigned_zna_counts[employee_id] = (
+                    assigned_zna_counts.get(employee_id, 0) + 1
+                )
         table.setRowCount(len(employee_ids))
         for row_idx, employee_id in enumerate(employee_ids):
             pref_stats = current.employee_preference_stats.get(employee_id, {})
@@ -1727,6 +1755,8 @@ class SolverTabPage(QWidget):
             values = [
                 self._employee_names.get(employee_id, f"#{employee_id}"),
                 str(current.assigned_shift_counts.get(employee_id, 0)),
+                str(assigned_hausdienst_counts.get(employee_id, 0)),
+                str(assigned_zna_counts.get(employee_id, 0)),
                 str(pref_stats.get("prefer_work_honored", 0)),
                 str(pref_stats.get("prefer_work_missed", 0)),
                 str(pref_stats.get("prefer_off_honored", 0)),
