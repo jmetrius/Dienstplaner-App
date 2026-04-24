@@ -60,39 +60,9 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo Checking requirements with pip...
-set "DRY_RUN_OUTPUT=%TEMP%\dienstplaner_pip_dry_run_%RANDOM%_%RANDOM%.log"
-python -m pip install --dry-run -r "%REQ_FILE%" > "%DRY_RUN_OUTPUT%" 2>&1
-set "DRY_RUN_EXIT=%ERRORLEVEL%"
-
-if not "%DRY_RUN_EXIT%"=="0" (
-  findstr /C:"no such option: --dry-run" "%DRY_RUN_OUTPUT%" >nul 2>&1
-  if not errorlevel 1 (
-    echo pip does not support --dry-run; installing requirements directly...
-    python -m pip install -r "%REQ_FILE%"
-    set "INSTALL_EXIT=%ERRORLEVEL%"
-    del /q "%DRY_RUN_OUTPUT%" >nul 2>&1
-    if not "%INSTALL_EXIT%"=="0" exit /b %INSTALL_EXIT%
-    goto :after_requirements
-  )
-  type "%DRY_RUN_OUTPUT%"
-  del /q "%DRY_RUN_OUTPUT%" >nul 2>&1
-  exit /b %DRY_RUN_EXIT%
-)
-
-findstr /C:"Would install" "%DRY_RUN_OUTPUT%" >nul 2>&1
-if not errorlevel 1 (
-  echo Installing/updating requirements...
-  python -m pip install -r "%REQ_FILE%"
-  set "INSTALL_EXIT=%ERRORLEVEL%"
-  del /q "%DRY_RUN_OUTPUT%" >nul 2>&1
-  if not "%INSTALL_EXIT%"=="0" exit /b %INSTALL_EXIT%
-) else (
-  echo Requirements already up to date.
-  del /q "%DRY_RUN_OUTPUT%" >nul 2>&1
-)
-
-:after_requirements
+echo Checking/installing requirements with pip...
+python -m pip install -r "%REQ_FILE%"
+if errorlevel 1 exit /b 1
 
 if "%DIENSTPLANER_SKIP_LAUNCH%"=="1" (
   echo Skipping app launch because DIENSTPLANER_SKIP_LAUNCH=1.

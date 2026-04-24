@@ -46,26 +46,8 @@ if ! python -m pip --version >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Checking requirements with pip..."
-set +e
-dry_run_output="$(python -m pip install --dry-run -r "${REQ_FILE}" 2>&1)"
-dry_run_exit=$?
-set -e
-
-if [[ ${dry_run_exit} -ne 0 ]]; then
-  if [[ "${dry_run_output}" == *"no such option: --dry-run"* ]]; then
-    echo "pip does not support --dry-run; installing requirements directly..."
-    python -m pip install -r "${REQ_FILE}"
-  else
-    printf '%s\n' "${dry_run_output}" >&2
-    exit ${dry_run_exit}
-  fi
-elif [[ "${dry_run_output}" == *"Would install"* ]]; then
-  echo "Installing/updating requirements..."
-  python -m pip install -r "${REQ_FILE}"
-else
-  echo "Requirements already up to date."
-fi
+echo "Checking/installing requirements with pip..."
+python -m pip install -r "${REQ_FILE}"
 
 if [[ "${DIENSTPLANER_SKIP_LAUNCH:-0}" == "1" ]]; then
   echo "Skipping app launch because DIENSTPLANER_SKIP_LAUNCH=1."
