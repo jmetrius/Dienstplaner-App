@@ -432,6 +432,13 @@ def solve_month_schedule(
         for idx in range(len(dates) - 2):
             d1 = dates[idx]
             d3 = dates[idx + 2]
+            # If the employee explicitly asked to work on one of the two
+            # endpoint days, do not penalize this specific work-rest-work gap.
+            if (
+                preferences.get((employee_id, d1)) == "prefer_work"
+                or preferences.get((employee_id, d3)) == "prefer_work"
+            ):
+                continue
             day1_expr = sum(employee_day_vars.get((employee_id, d1), [])) + employee_day_base.get(
                 (employee_id, d1), 0
             )
