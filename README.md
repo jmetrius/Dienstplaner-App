@@ -15,3 +15,19 @@ Simple Python scheduling project with a small SQLite database and solver logic.
    - `pip install -r requirements.txt`
 2. Run the application:
    - `python main.py`
+
+## One-command launchers (auto-venv)
+
+- Linux/macOS (bash):
+  - `bash run.sh`
+- Windows (Command Prompt):
+  - `run.bat`
+
+Both launchers:
+- Create `.venv` in the project folder if it does not exist.
+- Install/refresh dependencies only when `requirements.txt` changes.
+- Launch `main.py`.
+
+For CI/testing without opening the GUI:
+- Linux/macOS: `DIENSTPLANER_SKIP_LAUNCH=1 bash run.sh`
+- Windows: `set DIENSTPLANER_SKIP_LAUNCH=1 && run.bat`
