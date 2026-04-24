@@ -123,6 +123,10 @@ class MultiSelectComboBox(QComboBox):
             line.setPlaceholderText("No exclusions selected")
         self.activated.connect(self._on_item_activated)
 
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        # Prevent accidental value changes while scrolling the page.
+        event.ignore()
+
     def add_check_item(self, text: str, data: int, checked: bool = False) -> None:
         self.addItem(text, data)
         idx = self.count() - 1
@@ -193,6 +197,24 @@ class MultiSelectComboBox(QComboBox):
         if line is not None:
             line.setText(text)
             line.setToolTip(", ".join(names) if names else "No exclusions selected")
+
+
+class NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        # Prevent accidental value changes while scrolling the page.
+        event.ignore()
+
+
+class NoWheelSpinBox(QSpinBox):
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        # Prevent accidental value changes while scrolling the page.
+        event.ignore()
+
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        # Prevent accidental value changes while scrolling the page.
+        event.ignore()
 
 
 class AbsencesPreferencesPage(QWidget):
@@ -1068,7 +1090,7 @@ class EmployeeListPage(QWidget):
         self._rebuild_employee_row_lookup()
 
     def _make_clinic_combo(self, current_id: int | None) -> QComboBox:
-        cb = QComboBox()
+        cb = NoWheelComboBox()
         for c in self._clinics:
             cb.addItem(str(c["name"]), int(c["id"]))
         if cb.count() == 0:
@@ -1126,7 +1148,7 @@ class EmployeeListPage(QWidget):
         clinic_id = int(cid) if cid is not None else None
         self._table.setCellWidget(r, COL_CLINIC, self._make_clinic_combo(clinic_id))
 
-        spin = QSpinBox()
+        spin = NoWheelSpinBox()
         spin.setRange(0, 62)
         spin.setValue(int(emp["max_shifts_per_month"]))
         self._table.setCellWidget(r, COL_MAX_SHIFTS, spin)
@@ -1159,7 +1181,7 @@ class EmployeeListPage(QWidget):
 
         self._table.setCellWidget(r, COL_CLINIC, self._make_clinic_combo(None))
 
-        spin = QSpinBox()
+        spin = NoWheelSpinBox()
         spin.setRange(0, 62)
         spin.setValue(6)
         self._table.setCellWidget(r, COL_MAX_SHIFTS, spin)
@@ -1487,32 +1509,32 @@ class SolverTabPage(QWidget):
         root.addLayout(today_row)
 
         settings = QHBoxLayout()
-        self._spin_max_solutions = QSpinBox()
+        self._spin_max_solutions = NoWheelSpinBox()
         self._spin_max_solutions.setRange(1, 20)
         self._spin_max_solutions.setValue(3)
-        self._spin_time_limit = QDoubleSpinBox()
+        self._spin_time_limit = NoWheelDoubleSpinBox()
         self._spin_time_limit.setRange(1.0, 120.0)
         self._spin_time_limit.setSingleStep(1.0)
         self._spin_time_limit.setSuffix(" s")
         self._spin_time_limit.setValue(20.0)
-        self._spin_prefer_off_penalty = QSpinBox()
+        self._spin_prefer_off_penalty = NoWheelSpinBox()
         self._spin_prefer_off_penalty.setRange(0, 100)
         self._spin_prefer_off_penalty.setValue(8)
-        self._spin_prefer_work_reward = QSpinBox()
+        self._spin_prefer_work_reward = NoWheelSpinBox()
         self._spin_prefer_work_reward.setRange(0, 100)
         self._spin_prefer_work_reward.setValue(3)
-        self._spin_max_fairness_spread = QSpinBox()
+        self._spin_max_fairness_spread = NoWheelSpinBox()
         self._spin_max_fairness_spread.setRange(0, 31)
         self._spin_max_fairness_spread.setValue(1)
-        self._spin_mix_balance_weight = QSpinBox()
+        self._spin_mix_balance_weight = NoWheelSpinBox()
         self._spin_mix_balance_weight.setRange(0, 100)
         self._spin_mix_balance_weight.setValue(4)
-        self._spin_one_day_gap_penalty = QSpinBox()
+        self._spin_one_day_gap_penalty = NoWheelSpinBox()
         self._spin_one_day_gap_penalty.setRange(0, 200)
         self._spin_one_day_gap_penalty.setValue(5)
         self._chk_soft_clinic_rule = QCheckBox("Clinic/day rule soft")
         self._chk_soft_clinic_rule.setChecked(False)
-        self._spin_clinic_duplicate_penalty = QSpinBox()
+        self._spin_clinic_duplicate_penalty = NoWheelSpinBox()
         self._spin_clinic_duplicate_penalty.setRange(0, 500)
         self._spin_clinic_duplicate_penalty.setValue(20)
         self._spin_clinic_duplicate_penalty.setEnabled(False)
@@ -2770,7 +2792,7 @@ class MainWindow(QMainWindow):
         current_employee_id: int | None,
         highlight_today: bool,
     ) -> QComboBox:
-        cb = QComboBox()
+        cb = NoWheelComboBox()
         cb.setProperty("shift_date_iso", shift_date_iso)
         cb.setProperty("shift_slot", shift_slot)
         cb.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
