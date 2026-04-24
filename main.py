@@ -382,8 +382,8 @@ class AbsencesPreferencesPage(QWidget):
             self._on_month_changed(self._year, self._month)
         self.reload()
 
-    def set_month(self, year: int, month: int) -> None:
-        if (self._year, self._month) == (year, month):
+    def set_month(self, year: int, month: int, *, force_reload: bool = False) -> None:
+        if (self._year, self._month) == (year, month) and not force_reload:
             return
         self._year, self._month = year, month
         self.reload()
@@ -2568,7 +2568,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_after_employee_edit(self) -> None:
         self._rebuild_schedule_table()
-        self._absences_page.set_month(self._year, self._month)
+        self._absences_page.set_month(self._year, self._month, force_reload=True)
         self._solver_page.set_month(self._year, self._month)
 
     def _set_month_from_tabs(self, year: int, month: int) -> None:
@@ -2583,7 +2583,7 @@ class MainWindow(QMainWindow):
         if index == 0:
             self._rebuild_schedule_table()
         elif self._tabs.widget(index) is self._absences_page:
-            self._absences_page.set_month(self._year, self._month)
+            self._absences_page.set_month(self._year, self._month, force_reload=True)
         elif self._tabs.widget(index) is self._solver_page:
             self._solver_page.set_month(self._year, self._month)
 
