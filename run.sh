@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SCRIPT_DIR}/.venv"
 REQ_FILE="${SCRIPT_DIR}/requirements.txt"
-HASH_FILE="${VENV_DIR}/.requirements.sha256"
 VENV_PYTHON="${VENV_DIR}/bin/python"
 VENV_ACTIVATE="${VENV_DIR}/bin/activate"
 
@@ -47,16 +46,23 @@ if ! python -m pip --version >/dev/null 2>&1; then
   exit 1
 fi
 
-current_hash="$(python -c "import hashlib, pathlib; print(hashlib.sha256(pathlib.Path(r'${REQ_FILE}').read_bytes()).hexdigest())")"
-installed_hash=""
-if [[ -f "${HASH_FILE}" ]]; then
-  installed_hash="$(<"${HASH_FILE}")"
-fi
+echo "Checking requirements with pip..."
+set +e
+dry_run_output="$(python -m pip install --dry-run -r "${REQ_FILE}" 2>&1)"
+dry_run_exit=$?
+set -e
 
-if [[ "${current_hash}" != "${installed_hash}" ]]; then
+if [[ ${dry_run_exit} -ne 0 ]]; then
+  if [[ "${dry_run_output}" == *"no such option: --dry-run"* ]]; then
+    echo "pip does not support --dry-run; installing requirements directly..."
+    python -m pip install -r "${REQ_FILE}"
+  else
+    printf '%s\n' "${dry_run_output}" >&2
+    exit ${dry_run_exit}
+  fi
+elif [[ "${dry_run_output}" == *"Would install"* ]]; then
   echo "Installing/updating requirements..."
   python -m pip install -r "${REQ_FILE}"
-  printf '%s\n' "${current_hash}" > "${HASH_FILE}"
 else
   echo "Requirements already up to date."
 fi

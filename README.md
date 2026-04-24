@@ -25,7 +25,7 @@ Simple Python scheduling project with a small SQLite database and solver logic.
 
 Both launchers:
 - Create `.venv` in the project folder if it does not exist.
-- Install/refresh dependencies only when `requirements.txt` changes.
+- Use `python -m pip install -r requirements.txt`; pip skips already satisfied packages.
 - Launch `main.py`.
 
 For CI/testing without opening the GUI:

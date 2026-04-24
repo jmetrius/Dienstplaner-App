@@ -5,7 +5,6 @@ set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "VENV_DIR=%SCRIPT_DIR%\.venv"
 set "REQ_FILE=%SCRIPT_DIR%\requirements.txt"
-set "HASH_FILE=%VENV_DIR%\.requirements.sha256"
 
 if not exist "%REQ_FILE%" (
   echo requirements.txt not found at "%REQ_FILE%".
@@ -61,26 +60,39 @@ if errorlevel 1 (
   exit /b 1
 )
 
-set "CURRENT_HASH="
-for /f "usebackq delims=" %%H in (`python -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path(r'%REQ_FILE%').read_bytes()).hexdigest())"`) do set "CURRENT_HASH=%%H"
-if not defined CURRENT_HASH (
-  echo Failed to compute requirements hash.
-  exit /b 1
+echo Checking requirements with pip...
+set "DRY_RUN_OUTPUT=%TEMP%\dienstplaner_pip_dry_run_%RANDOM%_%RANDOM%.log"
+python -m pip install --dry-run -r "%REQ_FILE%" > "%DRY_RUN_OUTPUT%" 2>&1
+set "DRY_RUN_EXIT=%ERRORLEVEL%"
+
+if not "%DRY_RUN_EXIT%"=="0" (
+  findstr /C:"no such option: --dry-run" "%DRY_RUN_OUTPUT%" >nul 2>&1
+  if not errorlevel 1 (
+    echo pip does not support --dry-run; installing requirements directly...
+    python -m pip install -r "%REQ_FILE%"
+    set "INSTALL_EXIT=%ERRORLEVEL%"
+    del /q "%DRY_RUN_OUTPUT%" >nul 2>&1
+    if not "%INSTALL_EXIT%"=="0" exit /b %INSTALL_EXIT%
+    goto :after_requirements
+  )
+  type "%DRY_RUN_OUTPUT%"
+  del /q "%DRY_RUN_OUTPUT%" >nul 2>&1
+  exit /b %DRY_RUN_EXIT%
 )
 
-set "INSTALLED_HASH="
-if exist "%HASH_FILE%" (
-  set /p INSTALLED_HASH=<"%HASH_FILE%"
-)
-
-if /I not "%CURRENT_HASH%"=="%INSTALLED_HASH%" (
+findstr /C:"Would install" "%DRY_RUN_OUTPUT%" >nul 2>&1
+if not errorlevel 1 (
   echo Installing/updating requirements...
   python -m pip install -r "%REQ_FILE%"
-  if errorlevel 1 exit /b 1
-  > "%HASH_FILE%" echo %CURRENT_HASH%
+  set "INSTALL_EXIT=%ERRORLEVEL%"
+  del /q "%DRY_RUN_OUTPUT%" >nul 2>&1
+  if not "%INSTALL_EXIT%"=="0" exit /b %INSTALL_EXIT%
 ) else (
   echo Requirements already up to date.
+  del /q "%DRY_RUN_OUTPUT%" >nul 2>&1
 )
+
+:after_requirements
 
 if "%DIENSTPLANER_SKIP_LAUNCH%"=="1" (
   echo Skipping app launch because DIENSTPLANER_SKIP_LAUNCH=1.
