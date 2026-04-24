@@ -36,6 +36,7 @@ class SolverConfig:
     one_day_gap_penalty: int = 5
     clinic_uniqueness_soft: bool = False
     clinic_duplicate_penalty: int = 20
+    partial_fill_on_infeasible: bool = False
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ def solve_month_schedule(
     config: SolverConfig | None = None,
     logger: Callable[[str], None] | None = None,
     _skip_spread_diagnostic: bool = False,
+    _allow_partial_fill: bool = False,
 ) -> SolverResult:
     """
     Build and solve a monthly schedule model.
@@ -213,6 +215,9 @@ def solve_month_schedule(
     employee_month_base: dict[int, int] = {employee_id: 0 for employee_id in solver_employee_ids}
     clinic_day_base: dict[tuple[int, str], int] = {}
 
+    partial_fill_slot_penalty = 1000
+    partial_fill_terms: list[cp_model.LinearExpr] = []
+
     # Base counters represent assignments that are already fixed externally.
     # Decision variables are added *on top* of these bases.
     for iso_date, rows in external_assignments_by_date.items():
@@ -289,7 +294,16 @@ def solve_month_schedule(
                 candidates.append(employee_id)
                 employee_day_vars.setdefault((employee_id, iso_date), []).append(var)
                 employee_month_vars.setdefault(employee_id, []).append(var)
-            if not candidates:
+            candidate_vars = [variables[(iso_date, slot, employee_id)] for employee_id in candidates]
+            if _allow_partial_fill:
+                slot_candidates[(iso_date, slot)] = candidates
+                if candidate_vars:
+                    model.AddAtMostOne(candidate_vars)
+                # Penalize unfilled slots in partial mode so solver fills as much as possible.
+                partial_fill_terms.append(partial_fill_slot_penalty * (1 - sum(candidate_vars)))
+                if not candidates:
+                    continue
+            elif not candidates:
                 log(f"Infeasible slot: no eligible employee for {iso_date} / {slot}.")
                 return SolverResult(
                     solutions=[],
@@ -297,10 +311,10 @@ def solve_month_schedule(
                     message="No eligible candidates for at least one shift.",
                     logs=logs,
                 )
-            slot_candidates[(iso_date, slot)] = candidates
-            model.AddExactlyOne(
-                [variables[(iso_date, slot, employee_id)] for employee_id in candidates]
-            )
+            if (iso_date, slot) not in slot_candidates:
+                slot_candidates[(iso_date, slot)] = candidates
+            if not _allow_partial_fill:
+                model.AddExactlyOne(candidate_vars)
 
     # Hard rule: every day must include at least one ZNA doctor with
     # "Notaufnahme-Facharztstandard" across ZNA slots.
@@ -543,6 +557,12 @@ def solve_month_schedule(
         objective_terms.append(cfg.one_day_gap_penalty * sum(one_day_gap_vars))
     if cfg.clinic_uniqueness_soft and clinic_soft_terms:
         objective_terms.append(cfg.clinic_duplicate_penalty * sum(clinic_soft_terms))
+    if _allow_partial_fill and partial_fill_terms:
+        objective_terms.extend(partial_fill_terms)
+        log(
+            "Partial-fill fallback enabled: minimizing unfilled open slots first "
+            f"(penalty={partial_fill_slot_penalty} per slot), while still applying soft terms."
+        )
 
     # Count fixed Haus/ZNA assignments so mix balancing reflects full month load.
     fixed_haus_count_by_employee: dict[int, int] = {
@@ -782,6 +802,33 @@ def solve_month_schedule(
     # If no solution is found, run an optional diagnostic pass with a relaxed
     # fairness spread to provide actionable feedback.
     if not solutions:
+        if cfg.partial_fill_on_infeasible and not _allow_partial_fill:
+            log(
+                "No fully feasible schedule found; retrying in partial-fill mode "
+                "(fill as many open slots as possible)."
+            )
+            partial_result = solve_month_schedule(
+                year=year,
+                month=month,
+                clinic_id=clinic_id,
+                solver_input=solver_input,
+                config=cfg,
+                logger=None,
+                _skip_spread_diagnostic=True,
+                _allow_partial_fill=True,
+            )
+            for entry in partial_result.logs:
+                log(f"[partial] {entry}")
+            if partial_result.solutions:
+                return SolverResult(
+                    solutions=partial_result.solutions,
+                    status="partial",
+                    message=(
+                        "No fully feasible solution found; generated partial solution(s) "
+                        "that fill as many slots as possible."
+                    ),
+                    logs=logs,
+                )
         if (
             not _skip_spread_diagnostic
             and cfg.max_fairness_spread >= 0

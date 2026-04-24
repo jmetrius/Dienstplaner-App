@@ -104,3 +104,35 @@ The solver minimizes a weighted sum of soft terms.
   - objective reporting.
 - ZNA clinic employees are intentionally excluded from automatic assignment and
   remain manual-only in the current model.
+
+### Fallback mode (partial fill on infeasible)
+
+If `partial_fill_on_infeasible` is enabled in the Solver UI, the solver runs in
+two stages:
+
+1. **Normal mode first** (full-feasibility model above).
+2. If no solution exists, **fallback mode** is started and returns status `partial`
+   when at least one best-effort solution is found.
+
+In fallback mode, constraints are handled explicitly as follows:
+
+- **Relaxed**
+  - Open-slot coverage changes from **exactly one** to **at most one**.
+    - Result: open slots may remain unfilled.
+
+- **Still enforced (hard)**
+  - eligibility filtering (qualification/blocked weekday/absence),
+  - fixed assignment consistency checks,
+  - at most one shift per employee per day,
+  - no consecutive working days,
+  - same-day incompatibility pairs,
+  - weekend cap,
+  - monthly max shifts,
+  - daily ZNA Facharzt coverage (`Notaufnahme-Facharztstandard`),
+  - fairness spread hard cap,
+  - clinic/day uniqueness hard rule (unless `clinic_uniqueness_soft` is enabled, as in normal mode).
+
+- **Objective priority**
+  - Primary driver: minimize number of unfilled open slots (large per-slot penalty).
+  - Then standard soft terms apply (preferences, one-day-gap, mix balance, and
+    optional clinic-duplicate penalty when clinic uniqueness is soft).

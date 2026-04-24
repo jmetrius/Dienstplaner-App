@@ -1541,6 +1541,8 @@ class SolverTabPage(QWidget):
         self._chk_soft_clinic_rule.toggled.connect(
             self._spin_clinic_duplicate_penalty.setEnabled
         )
+        self._chk_partial_fill_if_infeasible = QCheckBox("Allow partial fill if infeasible")
+        self._chk_partial_fill_if_infeasible.setChecked(False)
 
         max_solutions_tip = (
             "Maximum number of alternative solutions to generate. Higher values "
@@ -1577,6 +1579,10 @@ class SolverTabPage(QWidget):
         clinic_duplicate_tip = (
             "Penalty per extra same-clinic assignment on a day when the "
             "'Clinic/day rule soft' option is enabled."
+        )
+        partial_fill_tip = (
+            "If no fully feasible schedule exists, rerun in fallback mode and fill "
+            "as many open slots as possible."
         )
 
         lbl_max_solutions = QLabel("Max solutions")
@@ -1621,6 +1627,8 @@ class SolverTabPage(QWidget):
         self._spin_clinic_duplicate_penalty.setToolTip(clinic_duplicate_tip)
         settings.addWidget(lbl_clinic_duplicate)
         settings.addWidget(self._spin_clinic_duplicate_penalty)
+        self._chk_partial_fill_if_infeasible.setToolTip(partial_fill_tip)
+        settings.addWidget(self._chk_partial_fill_if_infeasible)
         settings.addStretch(1)
         root.addLayout(settings)
 
@@ -1786,6 +1794,7 @@ class SolverTabPage(QWidget):
         self._spin_mix_balance_weight.setEnabled(not self._running)
         self._spin_one_day_gap_penalty.setEnabled(not self._running)
         self._chk_soft_clinic_rule.setEnabled(not self._running)
+        self._chk_partial_fill_if_infeasible.setEnabled(not self._running)
         self._spin_clinic_duplicate_penalty.setEnabled(
             (not self._running) and self._chk_soft_clinic_rule.isChecked()
         )
@@ -1887,6 +1896,7 @@ class SolverTabPage(QWidget):
             one_day_gap_penalty=int(self._spin_one_day_gap_penalty.value()),
             clinic_uniqueness_soft=self._chk_soft_clinic_rule.isChecked(),
             clinic_duplicate_penalty=int(self._spin_clinic_duplicate_penalty.value()),
+            partial_fill_on_infeasible=self._chk_partial_fill_if_infeasible.isChecked(),
         )
         # Mirror GUI settings into a plain dataclass to keep the worker interface stable.
         self._log(
@@ -1899,7 +1909,8 @@ class SolverTabPage(QWidget):
             f"mix_balance_weight={solver_config.mix_balance_weight}, "
             f"one_day_gap_penalty={solver_config.one_day_gap_penalty}, "
             f"clinic_rule_soft={solver_config.clinic_uniqueness_soft}, "
-            f"clinic_duplicate_penalty={solver_config.clinic_duplicate_penalty}"
+            f"clinic_duplicate_penalty={solver_config.clinic_duplicate_penalty}, "
+            f"partial_fill_on_infeasible={solver_config.partial_fill_on_infeasible}"
         )
 
         self._worker_thread = QThread(self)
