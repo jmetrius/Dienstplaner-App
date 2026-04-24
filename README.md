@@ -31,3 +31,76 @@ Both launchers:
 For CI/testing without opening the GUI:
 - Linux/macOS: `DIENSTPLANER_SKIP_LAUNCH=1 bash run.sh`
 - Windows: `set DIENSTPLANER_SKIP_LAUNCH=1 && run.bat`
+
+## Solver constraints and objective
+
+The monthly CP-SAT model in `solver.py` uses a mix of hard feasibility
+constraints and soft objective terms.
+
+### Hard constraints (must be satisfied)
+
+- **Exactly one employee per open slot**
+  - For each non-fixed `(date, shift_slot)`, the solver assigns exactly one
+    eligible employee.
+- **Eligibility filter for candidate generation**
+  - Candidate variables are only created for employees who:
+    - are solver-managed (employees in clinic `ZNA` are manual-only),
+    - have at least one required qualification for the slot,
+    - are not blocked on that weekday,
+    - are not absent on that date.
+- **Fixed assignment consistency checks**
+  - Fixed/manual assignments are validated before solving:
+    - no blocked-weekday violations,
+    - no absence violations,
+    - no >1 shift/day from fixed/base data,
+    - no fixed consecutive-day violations,
+    - no fixed incompatibility-pair violations,
+    - no fixed monthly-max violations.
+- **At most one shift per employee per day**
+  - Across fixed + newly assigned shifts.
+- **No consecutive working days**
+  - For non-`ZNA` constrained employees, day `d` and `d+1` cannot both be worked.
+- **Same-day incompatible employee pairs**
+  - Configured incompatibility pairs cannot both work on the same date.
+- **Weekend cap**
+  - Per employee: at most 2 worked ISO-weekend groups (Fri/Sat/Sun grouped by ISO week).
+- **Monthly max shifts per employee**
+  - Total assignments (fixed/base + new) must stay within `max_shifts_per_month`.
+- **ZNA Facharzt coverage rule**
+  - For each date, across `ZNA DR A/B`, at least one assigned doctor must have
+    qualification `Notaufnahme-Facharztstandard` (can be satisfied by fixed or new assignments).
+- **Clinic/day uniqueness rule (default hard mode)**
+  - On non-weekend days, per clinic (except clinic `ZNA`), at most one assignment
+    per day across all slots.
+- **Fairness spread hard cap**
+  - Let `total_e` be monthly assignments per solver-managed employee.
+  - Enforced: `max(total_e) - min(total_e) <= max_fairness_spread` (default `1`).
+
+### Soft objective terms (optimized, not mandatory)
+
+The solver minimizes a weighted sum of soft terms.
+
+- **Preference handling**
+  - `prefer_off`: penalty `prefer_off_penalty * assignment`.
+  - `prefer_work`: reward (negative cost) `-prefer_work_reward * assignment`.
+- **One-day-gap penalty (`work-rest-work`)**
+  - Penalizes patterns where an employee works day `d` and day `d+2`.
+  - Exception: for a specific pattern, no penalty variable is created if the
+    employee has explicit `prefer_work` on day `d` and day `d+2`.
+- **Mix-balance penalty for dual-qualified employees**
+  - For employees qualified for both Hausdienst and ZNA, minimize
+    `abs(haus_count - zna_count)` per employee, weighted by `mix_balance_weight`.
+- **Optional soft clinic uniqueness**
+  - If `clinic_uniqueness_soft` is enabled, clinic/day duplicates on non-weekend
+    days are allowed but penalized by `clinic_duplicate_penalty` per excess assignment.
+
+### Notes on fixed/manual assignments
+
+- Fixed/manual assignments are treated as base load and included in:
+  - daily constraints,
+  - monthly max limits,
+  - fairness totals,
+  - clinic/day counting,
+  - objective reporting.
+- ZNA clinic employees are intentionally excluded from automatic assignment and
+  remain manual-only in the current model.
