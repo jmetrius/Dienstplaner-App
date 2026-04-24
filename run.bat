@@ -1,0 +1,73 @@
+@echo off
+setlocal EnableExtensions
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+set "VENV_DIR=%SCRIPT_DIR%\.venv"
+set "REQ_FILE=%SCRIPT_DIR%\requirements.txt"
+
+if not exist "%REQ_FILE%" (
+  echo requirements.txt not found at "%REQ_FILE%".
+  exit /b 1
+)
+
+set "PYTHON_BOOTSTRAP="
+where py >nul 2>&1
+if not errorlevel 1 (
+  py -3 -c "import sys" >nul 2>&1
+  if not errorlevel 1 set "PYTHON_BOOTSTRAP=py -3"
+)
+if not defined PYTHON_BOOTSTRAP (
+  where python >nul 2>&1
+  if errorlevel 1 (
+    echo Python was not found in PATH.
+    exit /b 1
+  )
+  set "PYTHON_BOOTSTRAP=python"
+)
+
+if not exist "%VENV_DIR%\Scripts\python.exe" (
+  if exist "%VENV_DIR%" (
+    echo Existing virtual environment looks incomplete. Rebuilding...
+    rmdir /s /q "%VENV_DIR%"
+  )
+  echo Creating virtual environment in "%VENV_DIR%"...
+  %PYTHON_BOOTSTRAP% -m venv "%VENV_DIR%"
+  if errorlevel 1 (
+    echo Standard venv creation failed. Trying virtualenv fallback...
+    %PYTHON_BOOTSTRAP% -m pip install --user virtualenv
+    if errorlevel 1 (
+      echo Failed to install virtualenv fallback.
+      exit /b 1
+    )
+    %PYTHON_BOOTSTRAP% -m virtualenv "%VENV_DIR%"
+    if errorlevel 1 (
+      echo Failed to create virtual environment via virtualenv.
+      exit /b 1
+    )
+  )
+)
+
+call "%VENV_DIR%\Scripts\activate.bat"
+if errorlevel 1 (
+  echo Failed to activate virtual environment.
+  exit /b 1
+)
+
+python -m pip --version >nul 2>&1
+if errorlevel 1 (
+  echo pip is unavailable in the virtual environment.
+  exit /b 1
+)
+
+echo Checking/installing requirements with pip...
+python -m pip install -r "%REQ_FILE%"
+if errorlevel 1 exit /b 1
+
+if "%DIENSTPLANER_SKIP_LAUNCH%"=="1" (
+  echo Skipping app launch because DIENSTPLANER_SKIP_LAUNCH=1.
+  exit /b 0
+)
+
+python "%SCRIPT_DIR%\main.py"
+exit /b %errorlevel%
