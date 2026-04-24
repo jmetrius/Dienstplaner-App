@@ -2746,7 +2746,6 @@ class MainWindow(QMainWindow):
         headers = [SHIFT_SLOT_LABELS[code] for code in SHIFT_SLOT_CODES]
         self._schedule_table.setHorizontalHeaderLabels(headers)
 
-        today = date.today()
         row_labels: list[str] = []
         for d in range(1, days_in_month + 1):
             day_dt = date(self._year, self._month, d)
@@ -2765,7 +2764,6 @@ class MainWindow(QMainWindow):
             for d in range(1, days_in_month + 1):
                 day_dt = date(self._year, self._month, d)
                 iso = day_dt.isoformat()
-                is_today = day_dt == today
                 for col, slot in enumerate(SHIFT_SLOT_CODES):
                     current_id = ids_map.get((iso, slot))
                     cb = self._make_schedule_shift_combo(
@@ -2774,7 +2772,6 @@ class MainWindow(QMainWindow):
                         shift_date_iso=iso,
                         shift_slot=slot,
                         current_employee_id=current_id,
-                        highlight_today=is_today,
                     )
                     self._schedule_table.setCellWidget(d - 1, col, cb)
         finally:
@@ -2790,7 +2787,6 @@ class MainWindow(QMainWindow):
         shift_date_iso: str,
         shift_slot: str,
         current_employee_id: int | None,
-        highlight_today: bool,
     ) -> QComboBox:
         cb = NoWheelComboBox()
         cb.setProperty("shift_date_iso", shift_date_iso)
@@ -2829,11 +2825,6 @@ class MainWindow(QMainWindow):
                     break
         else:
             cb.setCurrentIndex(0)
-
-        if highlight_today:
-            cb.setStyleSheet(
-                "QComboBox { background-color: #e8f4fc; font-weight: bold; }"
-            )
 
         cb.currentIndexChanged.connect(self._on_schedule_shift_combo_changed)
         return cb
