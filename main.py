@@ -262,17 +262,6 @@ class AbsencesPreferencesPage(QWidget):
         nav2.addStretch(1)
         root.addLayout(nav2)
 
-        save_bar = QHBoxLayout()
-        self._btn_save_all = QPushButton("Save changes")
-        self._btn_save_all.setToolTip(
-            "Save all edits in absences and shift preferences together."
-        )
-        self._btn_save_all.clicked.connect(self._save_all_sections)
-        save_bar.addStretch(1)
-        save_bar.addWidget(self._btn_save_all)
-        save_bar.addStretch(1)
-        root.addLayout(save_bar)
-
         hint = QLabel(
             "Absences: ranges that overlap the selected month are listed (ranges may extend "
             "outside the month). Preferences: date ranges are supported and are expanded "
@@ -293,9 +282,15 @@ class AbsencesPreferencesPage(QWidget):
         self._btn_abs_add.clicked.connect(self._add_absence_row)
         self._btn_abs_quick_add.clicked.connect(self._quick_add_absence_ranges)
         self._btn_abs_del.clicked.connect(self._delete_absence_selected)
+        self._btn_save_all = QPushButton("Save changes")
+        self._btn_save_all.setToolTip(
+            "Save all edits in absences and shift preferences together."
+        )
+        self._btn_save_all.clicked.connect(self._save_all_sections)
         abs_bar.addWidget(self._btn_abs_add)
         abs_bar.addWidget(self._btn_abs_quick_add)
         abs_bar.addWidget(self._btn_abs_del)
+        abs_bar.addWidget(self._btn_save_all)
         abs_bar.addStretch(1)
         abs_lay.addLayout(abs_bar)
 
@@ -324,9 +319,15 @@ class AbsencesPreferencesPage(QWidget):
         self._btn_pref_add.clicked.connect(self._add_pref_row)
         self._btn_pref_quick_add.clicked.connect(self._quick_add_preference_ranges)
         self._btn_pref_del.clicked.connect(self._delete_pref_selected)
+        self._btn_save_all_pref = QPushButton("Save changes")
+        self._btn_save_all_pref.setToolTip(
+            "Save all edits in absences and shift preferences together."
+        )
+        self._btn_save_all_pref.clicked.connect(self._save_all_sections)
         pref_bar.addWidget(self._btn_pref_add)
         pref_bar.addWidget(self._btn_pref_quick_add)
         pref_bar.addWidget(self._btn_pref_del)
+        pref_bar.addWidget(self._btn_save_all_pref)
         pref_bar.addStretch(1)
         pref_lay.addLayout(pref_bar)
 
