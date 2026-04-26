@@ -70,8 +70,8 @@ constraints and soft objective terms.
   - For each date, across `ZNA DR A/B`, at least one assigned doctor must have
     qualification `Notaufnahme-Facharztstandard` (can be satisfied by fixed or new assignments).
 - **Clinic/day uniqueness rule (default hard mode)**
-  - On non-weekend days, per clinic (except clinic `ZNA`), at most one assignment
-    per day across all slots.
+  - On Monday-Thursday and Sunday (Friday/Saturday exempt), per clinic
+    (except clinic `ZNA`), at most one assignment per day across all slots.
 - **Fairness spread hard cap**
   - Let `total_e` be monthly assignments per solver-managed employee.
   - Enforced: `max(total_e) - min(total_e) <= max_fairness_spread` (default `1`).
@@ -91,8 +91,9 @@ The solver minimizes a weighted sum of soft terms.
   - For employees qualified for both Hausdienst and ZNA, minimize
     `abs(haus_count - zna_count)` per employee, weighted by `mix_balance_weight`.
 - **Optional soft clinic uniqueness**
-  - If `clinic_uniqueness_soft` is enabled, clinic/day duplicates on non-weekend
-    days are allowed but penalized by `clinic_duplicate_penalty` per excess assignment.
+  - If `clinic_uniqueness_soft` is enabled, clinic/day duplicates on
+    Monday-Thursday and Sunday are allowed but penalized by
+    `clinic_duplicate_penalty` per excess assignment.
 
 ### Notes on fixed/manual assignments
 

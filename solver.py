@@ -72,6 +72,13 @@ def _is_weekend_day(iso_date: str) -> bool:
     return _weekday(iso_date) in (4, 5, 6)
 
 
+def _is_clinic_uniqueness_exempt_day(iso_date: str) -> bool:
+    """Return whether clinic/day uniqueness should be skipped for this date."""
+
+    # This rule is exempt only on Friday/Saturday. It applies on Sunday.
+    return _weekday(iso_date) in (4, 5)
+
+
 def _weekend_group_key(iso_date: str) -> tuple[int, int]:
     """Return `(iso_year, iso_week)` used to group weekend days."""
 
@@ -482,6 +489,7 @@ def solve_month_schedule(
         model.Add(sum(employee_month_vars.get(employee_id, [])) + base_count <= max_shifts)
 
     # Clinic uniqueness: usually hard, optionally softened via excess variables.
+    # Exempt on Friday/Saturday only; Sunday is enforced.
     clinic_ids = {
         int(clinic_value)
         for clinic_value in employee_clinic_by_id.values()
@@ -489,7 +497,7 @@ def solve_month_schedule(
     }
     clinic_soft_terms: list[cp_model.IntVar] = []
     for iso_date in dates:
-        if _is_weekend_day(iso_date):
+        if _is_clinic_uniqueness_exempt_day(iso_date):
             continue
         for clinic_value in clinic_ids:
             if clinic_value in zna_clinic_ids:
